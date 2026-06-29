@@ -560,6 +560,7 @@ tar -C "$rootfs_dir" -xpf "$rootfs_archive" --numeric-owner
 
 install -d -m 0755 "$rootfs_dir/etc/pacman.d" "$rootfs_dir/etc/systemd/system"
 printf 'Server = %s\n' "$ARCH_MIRROR" > "$rootfs_dir/etc/pacman.d/mirrorlist"
+rm -f "$rootfs_dir/etc/resolv.conf"
 cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
 
 mount_chroot_runtime
@@ -567,6 +568,7 @@ mount_chroot_runtime
 ci_log "initializing pacman keyring"
 arch_chroot /usr/bin/pacman-key --init
 arch_chroot /usr/bin/pacman-key --populate archlinuxarm
+arch_chroot /usr/bin/getent hosts os.archlinuxarm.org >/dev/null
 arch_chroot /usr/bin/pacman -Sy --noconfirm --needed archlinuxarm-keyring
 
 mapfile -t packages < <(build_package_list)
