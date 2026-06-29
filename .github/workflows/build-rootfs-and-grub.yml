@@ -234,8 +234,8 @@ jobs:
           ROOT_PARTLABEL=$INPUT_ROOTFS_PARTLABEL
           CONFIG_EOF
 
-          scripts/ci/apply-workflow-config.sh "$RUNNER_TEMP/rootfs.env"
-          scripts/ci/apply-workflow-config.sh "$RUNNER_TEMP/boot.env"
+          bash scripts/ci/apply-workflow-config.sh "$RUNNER_TEMP/rootfs.env"
+          bash scripts/ci/apply-workflow-config.sh "$RUNNER_TEMP/boot.env"
 
           cp "$RUNNER_TEMP/rootfs.env" "$RUNNER_TEMP/build-config-notes/rootfs.env"
           cp "$RUNNER_TEMP/boot.env" "$RUNNER_TEMP/build-config-notes/boot.env"
