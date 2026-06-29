@@ -20,7 +20,7 @@ on:
       arch_mirror:
         description: pacman mirror Server line.
         required: true
-        default: http://mirror.archlinuxarm.org/$arch/$repo
+        default: http://os.archlinuxarm.org/$arch/$repo
         type: string
       desktop_profile:
         description: Plasma package profile. standard is recommended for first builds.
@@ -147,7 +147,7 @@ jobs:
 
           cat > "$RUNNER_TEMP/rootfs.env" <<'CONFIG_EOF'
           ARCH_ROOTFS_URL=http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
-          ARCH_MIRROR=http://mirror.archlinuxarm.org/$arch/$repo
+          ARCH_MIRROR=http://os.archlinuxarm.org/$arch/$repo
           ROOTFS_IMAGE_SIZE=20G
           ROOTFS_LABEL=ArchLinux
           ROOTFS_PARTLABEL=userdata

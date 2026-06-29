@@ -67,7 +67,7 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
 OUTPUT_DIR=${OUTPUT_DIR:-out/ci-rootfs}
 OUTPUT_PREFIX=${OUTPUT_PREFIX:-y700-archlinuxarm}
 ARCH_ROOTFS_URL=${ARCH_ROOTFS_URL:-http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz}
-ARCH_MIRROR=${ARCH_MIRROR:-'http://mirror.archlinuxarm.org/$arch/$repo'}
+ARCH_MIRROR=${ARCH_MIRROR:-'http://os.archlinuxarm.org/$arch/$repo'}
 ROOTFS_IMAGE_SIZE=${ROOTFS_IMAGE_SIZE:-20G}
 ROOTFS_LABEL=${ROOTFS_LABEL:-ArchLinux}
 ROOTFS_PARTLABEL=${ROOTFS_PARTLABEL:-userdata}
@@ -560,7 +560,7 @@ tar -C "$rootfs_dir" -xpf "$rootfs_archive" --numeric-owner
 
 install -d -m 0755 "$rootfs_dir/etc/pacman.d" "$rootfs_dir/etc/systemd/system"
 printf 'Server = %s\n' "$ARCH_MIRROR" > "$rootfs_dir/etc/pacman.d/mirrorlist"
-printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$rootfs_dir/etc/resolv.conf"
+cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
 
 mount_chroot_runtime
 

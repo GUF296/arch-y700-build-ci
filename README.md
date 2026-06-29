@@ -77,6 +77,7 @@ Common workflow inputs:
 
 - `release_tag`: leave empty to only produce Actions artifacts
 - `desktop_profile`: `minimal`, `standard`, or `full`
+- `arch_mirror`: default `http://os.archlinuxarm.org/$arch/$repo`
 - `rootfs_image_size`: default `20G`
 - `hostname_name`: default `GUF296`
 - `default_user_name`: default `GUF296`
