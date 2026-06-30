@@ -1,0 +1,211 @@
+--- /mnt/c/Users/Administrator/Desktop/dump/y700-artifacts-20260503/work/camera-bringup-20260603/upstream-pipewire-1.6.2/pipewire-1.6.2/spa/plugins/libcamera/libcamera-source.cpp	2026-03-16 19:54:17.000000000 +0800
++++ /mnt/c/Users/Administrator/Desktop/dump/y700-artifacts-20260503/work/camera-bringup-20260603/current-daily-pulled-20260621/clean-minimal-daily-20260621/libcamera-source.cpp.minimal-daily	2026-06-21 18:59:39.133832600 +0800
+@@ -5,13 +5,19 @@
+ /* SPDX-License-Identifier: MIT */
+ 
+ #include <array>
++#include <cerrno>
+ #include <cstddef>
++#include <cstdio>
++#include <cstring>
+ #include <limits>
+ #include <optional>
+ #include <type_traits>
+ #include <utility>
+ 
++#include <fcntl.h>
++#include <sys/inotify.h>
+ #include <sys/mman.h>
++#include <unistd.h>
+ 
+ #include <spa/support/plugin.h>
+ #include <spa/support/log.h>
+@@ -1031,6 +1037,167 @@
+ 	);
+ }
+ 
++
++static uint32_t libcamera_orientation_to_spa_transform_value(Orientation orientation);
++
++static bool y700_camera(const struct impl *impl)
++{
++	if (!impl || !impl->camera)
++		return false;
++	return impl->camera->id().find("/base/soc@0/cci@ac15000") != std::string::npos ||
++		impl->camera->id().find("/base/soc@0/cci@ac16000") != std::string::npos;
++}
++
++static bool y700_rear_camera(const struct impl *impl)
++{
++	if (!impl || !impl->camera)
++		return false;
++	return impl->camera->id().find("/base/soc@0/cci@ac15000") != std::string::npos;
++}
++
++static int y700_kscreen_rotation_to_ccw_quarters(int rotation)
++{
++	switch (rotation) {
++	case 1: return 0;
++	case 2: return 1;
++	case 4: return 2;
++	case 8: return 3;
++	default: return 0;
++	}
++}
++
++static int y700_calibrated_extra_delta(const struct impl *impl, int rotation)
++{
++	switch (rotation) {
++	case 1:
++	case 4:
++		return 2;
++	case 2:
++	case 8:
++		return y700_rear_camera(impl) ? 2 : 0;
++	default:
++		return 0;
++	}
++}
++
++static bool y700_valid_kscreen_rotation(int rotation)
++{
++	return rotation == 1 || rotation == 2 || rotation == 4 || rotation == 8;
++}
++
++static int y700_cached_display_rotation = 1;
++static bool y700_display_rotation_initialized;
++static int y700_display_rotation_inotify_fd = -1;
++static int y700_display_rotation_inotify_wd = -1;
++
++static bool y700_query_kscreen_rotation(int *rotation)
++{
++	FILE *pipe;
++	int value;
++
++	pipe = popen("XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 /usr/bin/kscreen-doctor -o 2>/dev/null | /usr/bin/sed -r 's/\\x1B\\[[0-9;]*[A-Za-z]//g' | /usr/bin/awk '/Output:/ { in_dsi = ($0 ~ /DSI-1/) } in_dsi && /Rotation:/ { for (i = 1; i <= NF; i++) if ($i == \"Rotation:\") { print $(i + 1); exit } }'", "r");
++	if (!pipe)
++		return false;
++	if (fscanf(pipe, "%d", &value) != 1) {
++		pclose(pipe);
++		return false;
++	}
++	pclose(pipe);
++	if (!y700_valid_kscreen_rotation(value))
++		return false;
++	*rotation = value;
++	return true;
++}
++
++static void y700_display_rotation_watch_init()
++{
++	if (y700_display_rotation_inotify_fd >= 0)
++		return;
++	y700_display_rotation_inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
++	if (y700_display_rotation_inotify_fd < 0)
++		return;
++	y700_display_rotation_inotify_wd = inotify_add_watch(y700_display_rotation_inotify_fd,
++		"/home/y700/.config", IN_CLOSE_WRITE | IN_MODIFY | IN_MOVED_TO | IN_CREATE | IN_ATTRIB);
++	if (y700_display_rotation_inotify_wd < 0) {
++		close(y700_display_rotation_inotify_fd);
++		y700_display_rotation_inotify_fd = -1;
++	}
++}
++
++static bool y700_display_rotation_watch_changed()
++{
++	char buffer[1024];
++	ssize_t len;
++	bool changed = false;
++
++	if (y700_display_rotation_inotify_fd < 0)
++		return false;
++	for (;;) {
++		len = read(y700_display_rotation_inotify_fd, buffer, sizeof(buffer));
++		if (len > 0) {
++			ssize_t offset = 0;
++
++			while (offset + (ssize_t)sizeof(struct inotify_event) <= len) {
++				const struct inotify_event *event =
++					reinterpret_cast<const struct inotify_event *>(buffer + offset);
++				if (event->len > 0 && !strcmp(event->name, "kwinoutputconfig.json"))
++					changed = true;
++				offset += sizeof(struct inotify_event) + event->len;
++			}
++			continue;
++		}
++		if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
++			break;
++		break;
++	}
++	return changed;
++}
++
++static int y700_read_display_rotation()
++{
++	int rotation;
++
++	y700_display_rotation_watch_init();
++	if (!y700_display_rotation_initialized) {
++		if (y700_query_kscreen_rotation(&rotation))
++			y700_cached_display_rotation = rotation;
++		y700_display_rotation_initialized = true;
++		return y700_cached_display_rotation;
++	}
++	if (y700_display_rotation_watch_changed() && y700_query_kscreen_rotation(&rotation))
++		y700_cached_display_rotation = rotation;
++	return y700_cached_display_rotation;
++}
++
++static uint32_t y700_rotate_spa_transform(uint32_t transform, int ccw_delta)
++{
++	if (transform <= SPA_META_TRANSFORMATION_270)
++		return (transform + ccw_delta + 4) & 3;
++	return transform;
++}
++
++static uint32_t y700_effective_spa_transform(struct impl *impl, uint32_t transform)
++{
++	int display_rotation;
++	int display_ccw;
++
++	if (!y700_camera(impl))
++		return transform;
++	display_rotation = y700_read_display_rotation();
++	display_ccw = y700_kscreen_rotation_to_ccw_quarters(display_rotation);
++	display_ccw += y700_calibrated_extra_delta(impl, display_rotation);
++	return y700_rotate_spa_transform(transform, display_ccw);
++}
++
++static void y700_update_videotransform(struct impl *impl, struct buffer *b)
++{
++	uint32_t transform;
++	if (!b->videotransform)
++		return;
++	transform = libcamera_orientation_to_spa_transform_value(impl->config->orientation);
++	b->videotransform->transform = y700_effective_spa_transform(impl, transform);
++}
++
+ void handle_completed_request(struct impl *impl, libcamera::Request *request)
+ {
+ 	const auto request_id = request->cookie();
+@@ -1086,6 +1253,7 @@
+ 		impl->clock->next_nsec += (uint64_t) (target * SPA_NSEC_PER_SEC * corr);
+ 	}
+ 
++	y700_update_videotransform(impl, b);
+ 	if (b->h) {
+ 		b->h->flags = 0;
+ 		if (fmd.status != libcamera::FrameMetadata::Status::FrameSuccess)
+@@ -1233,11 +1401,9 @@
+ 		b->videotransform = (struct spa_meta_videotransform*)spa_buffer_find_meta_data(
+ 			buffers[i], SPA_META_VideoTransform, sizeof(*b->videotransform));
+ 		if (b->videotransform) {
+-			b->videotransform->transform =
+-				libcamera_orientation_to_spa_transform_value(impl->config->orientation);
++			y700_update_videotransform(impl, b);
+ 			spa_log_debug(impl->log, "Setting videotransform for buffer %u to %u",
+ 				i, b->videotransform->transform);
+-
+ 		}
+ 
+ 		const auto& planes = bufs[i]->planes();

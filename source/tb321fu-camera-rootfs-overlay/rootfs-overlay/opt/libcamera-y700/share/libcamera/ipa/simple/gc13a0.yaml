@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: CC0-1.0
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+      blackLevel: 2800
+  - Awb:
+      smoothing: 0.22
+      maxGain: 4.8
+      redBias: 1.00
+      blueBias: 1.12
+      zoneDiscardFraction: 0.25
+      zoneMinCount: 8
+      zoneBlendWeight: 0.10
+      zoneFallbackWeight: 0.60
+      zoneCenterWeight: 0.35
+      zoneMaxChroma: 0.50
+      zoneMinY: 20
+      zoneMaxY: 224
+  - Ccm:
+      ccms:
+        - ct: 3000
+          ccm: [ 1.15, -0.05, -0.10,
+                 -0.04, 1.02, 0.04,
+                 -0.02, -0.04, 1.02 ]
+        - ct: 6500
+          ccm: [ 1.13, -0.04, -0.09,
+                 -0.04, 1.02, 0.04,
+                 -0.02, -0.04, 1.02 ]
+  - Adjust:
+      gamma: 3.08
+      contrast: 1.16
+      saturation: 1.20
+      adaptiveTone: true
+      adaptiveSmoothing: 0.20
+      adaptiveGammaMin: 2.98
+      adaptiveGammaMax: 3.22
+      adaptiveContrastMin: 1.12
+      adaptiveContrastMax: 1.24
+      adaptiveSaturationMin: 1.12
+      adaptiveSaturationMax: 1.30
+      adaptivePreferZones: true
+      adaptiveZoneMinCount: 8
+      adaptiveZoneMinY: 24
+      adaptiveZoneMaxY: 214
+      adaptiveZoneMaxChroma: 0.42
+  - Agc:
+      targetMsv: 4.52
+      satisfactory: 0.12
+      proportionalGain: 0.060
+      maxStep: 0.22
+      histogramLowTrimFraction: 0.02
+      histogramHighTrimFraction: 0.08
+      exposureMax: 6500
+      exposureTimeMaxUs: 33333
+      gainMax: 8.0
+...
+

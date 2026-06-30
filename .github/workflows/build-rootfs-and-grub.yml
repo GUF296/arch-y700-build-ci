@@ -104,6 +104,11 @@ on:
         required: false
         default: ""
         type: string
+      source_config:
+        description: Optional advanced source/kernel config, one KEY=value per line.
+        required: false
+        default: ""
+        type: string
 
 jobs:
   build:
@@ -141,6 +146,7 @@ jobs:
           INPUT_BOOT_IMAGE_SIZE: ${{ inputs.boot_image_size }}
           INPUT_ROOTFS_CONFIG: ${{ inputs.rootfs_config }}
           INPUT_BOOT_CONFIG: ${{ inputs.boot_config }}
+          INPUT_SOURCE_CONFIG: ${{ inputs.source_config }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/build-config-notes"
@@ -165,8 +171,20 @@ jobs:
           DESKTOP_PROFILE=standard
           PACKAGE_LIST=
           INSTALL_FCITX5_CHINESE=1
+          INSTALL_FIREFOX=1
+          INSTALL_CAMERA_APPS=1
           DEVICE_DEB_ARCHIVE=https://github.com/GUF296/ubuntu-y700-build-ci/releases/download/bootstrap-y700-20260625/y700-device-debs-20260624-201420-compat1.tar.gz
           DEVICE_DEB_DIR=
+          SENSOR_DEB_ARCHIVE=https://github.com/GUF296/tb321fu-sensor-debs/releases/download/tb321fu-sensor-debs-20260627.1/tb321fu-sensor-debs_20260627.1_arm64.tar.gz
+          SENSOR_DEB_DIR=
+          HAPTICS_DEB_ARCHIVE=https://github.com/GUF296/tb321fu-haptics-debs/releases/download/tb321fu-haptics-debs-20260627.2/tb321fu-haptics-debs_20260627.2_arm64.tar.gz
+          HAPTICS_DEB_DIR=
+          CAMERA_STACK_ARCHIVE=
+          CAMERA_STACK_DIR=
+          BUILD_TB321FU_GPU_SENSOR=1
+          TB321FU_GPU_SENSOR_SOURCE_ARCHIVE=
+          TB321FU_GPU_SENSOR_SOURCE_DIR=
+          TB321FU_GPU_SENSOR_BUILD_JOBS=2
           OVERLAY_ARCHIVE=
           OVERLAY_DIR=
           KERNEL_VERSION=7.1.1-g5df8e852ea72
@@ -185,13 +203,6 @@ jobs:
           BOOT_FAT_LABEL=Y700GRUB
           BOOT_SECTOR_SIZE=512
           BOOT_CLUSTER_SECTORS=
-          KERNEL_ARTIFACT_ARCHIVE=https://github.com/GUF296/ubuntu-y700-build-ci/releases/download/bootstrap-y700-20260625/y700-kernel-artifacts-7.1.1-g5df8e852ea72.tar.gz
-          BOOTAA64_EFI_URL=
-          QCOMRAMP_EFI=
-          QCOMRAMP_EFI_URL=
-          QCOMRAMP_CFG_NAME=qcomramp.cfg
-          GRUB_BUILD_ARCHIVE=
-          DTB_NAME=sm8650-lenovo-tb321fu.dtb
           ROOT_SELECTOR=partlabel
           ROOT_PARTLABEL=userdata
           ROOT_UUID=
@@ -203,6 +214,16 @@ jobs:
           KEEP_BOOT_IMAGE=0
           CONFIG_EOF
 
+          cat > "$RUNNER_TEMP/source.env" <<'CONFIG_EOF'
+          KERNEL_ARTIFACT_ARCHIVE=https://github.com/GUF296/ubuntu-y700-build-ci/releases/download/bootstrap-y700-20260625/y700-kernel-artifacts-7.1.1-g5df8e852ea72.tar.gz
+          BOOTAA64_EFI_URL=
+          QCOMRAMP_EFI=
+          QCOMRAMP_EFI_URL=
+          QCOMRAMP_CFG_NAME=qcomramp.cfg
+          GRUB_BUILD_ARCHIVE=
+          DTB_NAME=sm8650-lenovo-tb321fu.dtb
+          CONFIG_EOF
+
           append_config() {
             local file=$1
             local content=$2
@@ -212,6 +233,7 @@ jobs:
 
           append_config "$RUNNER_TEMP/rootfs.env" "$INPUT_ROOTFS_CONFIG"
           append_config "$RUNNER_TEMP/boot.env" "$INPUT_BOOT_CONFIG"
+          append_config "$RUNNER_TEMP/source.env" "$INPUT_SOURCE_CONFIG"
 
           cat >> "$RUNNER_TEMP/rootfs.env" <<CONFIG_EOF
           ARCH_ROOTFS_URL=$INPUT_ARCH_ROOTFS_URL
@@ -236,9 +258,11 @@ jobs:
 
           bash scripts/ci/apply-workflow-config.sh "$RUNNER_TEMP/rootfs.env"
           bash scripts/ci/apply-workflow-config.sh "$RUNNER_TEMP/boot.env"
+          bash scripts/ci/apply-workflow-config.sh "$RUNNER_TEMP/source.env"
 
           cp "$RUNNER_TEMP/rootfs.env" "$RUNNER_TEMP/build-config-notes/rootfs.env"
           cp "$RUNNER_TEMP/boot.env" "$RUNNER_TEMP/build-config-notes/boot.env"
+          cp "$RUNNER_TEMP/source.env" "$RUNNER_TEMP/build-config-notes/source.env"
           echo "BUILD_CONFIG_NOTES_DIR=$RUNNER_TEMP/build-config-notes" >> "$GITHUB_ENV"
           echo "OUTPUT_PREFIX=${{ inputs.output_prefix }}" >> "$GITHUB_ENV"
           echo "OUTPUT_DIR_ROOTFS=out/ci-rootfs" >> "$GITHUB_ENV"
@@ -248,7 +272,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$OUTPUT_DIR_ROOTFS"
-          sudo --preserve-env=OUTPUT_PREFIX,ARCH_ROOTFS_URL,ARCH_MIRROR,http_proxy,https_proxy,HTTP_PROXY,HTTPS_PROXY,ROOTFS_IMAGE_SIZE,ROOTFS_LABEL,ROOTFS_PARTLABEL,HOSTNAME_NAME,DEFAULT_USER_NAME,DEFAULT_USER_PASSWORD,ROOT_PASSWORD_MODE,ROOT_PASSWORD,USER_SUDO_MODE,SDDM_AUTOLOGIN,SDDM_AUTOLOGIN_SESSION,TZ_REGION,LOCALES,LANG_NAME,DESKTOP_PROFILE,PACKAGE_LIST,INSTALL_FCITX5_CHINESE,DEVICE_DEB_ARCHIVE,DEVICE_DEB_DIR,OVERLAY_ARCHIVE,OVERLAY_DIR,KERNEL_VERSION,APPLY_Y700_FIRMWARE_FIXES,APPLY_Y700_AUDIO_POLICY_FIXES,COMPRESS,CHUNK_SIZE,KEEP_RAW_IMAGE \
+          sudo --preserve-env=OUTPUT_PREFIX,ARCH_ROOTFS_URL,ARCH_MIRROR,http_proxy,https_proxy,HTTP_PROXY,HTTPS_PROXY,ROOTFS_IMAGE_SIZE,ROOTFS_LABEL,ROOTFS_PARTLABEL,HOSTNAME_NAME,DEFAULT_USER_NAME,DEFAULT_USER_PASSWORD,ROOT_PASSWORD_MODE,ROOT_PASSWORD,USER_SUDO_MODE,SDDM_AUTOLOGIN,SDDM_AUTOLOGIN_SESSION,TZ_REGION,LOCALES,LANG_NAME,DESKTOP_PROFILE,PACKAGE_LIST,INSTALL_FCITX5_CHINESE,INSTALL_FIREFOX,INSTALL_CAMERA_APPS,DEVICE_DEB_ARCHIVE,DEVICE_DEB_DIR,SENSOR_DEB_ARCHIVE,SENSOR_DEB_DIR,HAPTICS_DEB_ARCHIVE,HAPTICS_DEB_DIR,CAMERA_STACK_ARCHIVE,CAMERA_STACK_DIR,BUILD_TB321FU_GPU_SENSOR,TB321FU_GPU_SENSOR_SOURCE_ARCHIVE,TB321FU_GPU_SENSOR_SOURCE_DIR,TB321FU_GPU_SENSOR_BUILD_JOBS,OVERLAY_ARCHIVE,OVERLAY_DIR,KERNEL_VERSION,APPLY_Y700_FIRMWARE_FIXES,APPLY_Y700_AUDIO_POLICY_FIXES,COMPRESS,CHUNK_SIZE,KEEP_RAW_IMAGE \
             env OUTPUT_DIR="$OUTPUT_DIR_ROOTFS" bash scripts/ci/build-arch-rootfs-image.sh
 
       - name: Build GRUB boot image
@@ -262,7 +286,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out/ci-release
+          install -m 0644 source/boot-image/boot.img.7z out/ci-release/boot.img.7z
           find "$OUTPUT_DIR_ROOTFS" "$OUTPUT_DIR_GRUB" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > out/ci-release/SHA256SUMS.txt
+          (cd out/ci-release && sha256sum boot.img.7z >> SHA256SUMS.txt)
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -271,6 +297,7 @@ jobs:
           path: |
             out/ci-rootfs/*
             out/ci-grub/*
+            out/ci-release/boot.img.7z
             out/ci-release/SHA256SUMS.txt
 
       - name: Upload metadata artifact
@@ -285,6 +312,7 @@ jobs:
             out/ci-rootfs/*.raw.sha256
             out/ci-grub/*.SHA256SUMS
             out/ci-grub/*.raw.sha256
+            out/ci-release/boot.img.7z
             out/ci-release/SHA256SUMS.txt
             ${{ env.BUILD_CONFIG_NOTES_DIR }}/*
 
@@ -357,6 +385,7 @@ jobs:
             echo "- Workflow run: \`$GITHUB_RUN_ID\`"
             echo
             echo 'This release contains Arch Linux ARM Plasma assets for Lenovo Y700 / TB321FU.'
+            echo 'Password-like values are redacted in these release notes.'
             echo
             echo 'The release asset names are intentionally short: `boot.img.7z`, `grub.img.7z`, and split rootfs parts such as `rootfs.img.7z.000` / `rootfs.img.7z.001`.'
             echo
@@ -364,23 +393,32 @@ jobs:
             echo
             echo '## RootFS Config'
             echo '```text'
-            cat "${BUILD_CONFIG_NOTES_DIR:?}/rootfs.env"
+            sed -E 's/^((DEFAULT_USER_PASSWORD|ROOT_PASSWORD)=).*/\1<redacted>/' "${BUILD_CONFIG_NOTES_DIR:?}/rootfs.env"
             echo '```'
             echo
             echo '## Boot Config'
             echo '```text'
             cat "${BUILD_CONFIG_NOTES_DIR:?}/boot.env"
             echo '```'
+            echo
+            echo '## Source Config'
+            echo '```text'
+            cat "${BUILD_CONFIG_NOTES_DIR:?}/source.env"
+            echo '```'
           } > "$notes"
 
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes"
-          gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes" --latest=false --prerelease=false --draft=false
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes"
+            release_id=$(gh api "repos/${GITHUB_REPOSITORY:?}/releases/tags/$RELEASE_TAG" --jq .id)
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY:?}/releases/$release_id" -F draft=false -F prerelease=false -F make_latest=true >/dev/null
+            while IFS= read -r asset_name; do
+              [ -n "$asset_name" ] || continue
+              gh release delete-asset "$RELEASE_TAG" "$asset_name" -y || true
+            done < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          else
+            gh release create "$RELEASE_TAG" --latest --title "$RELEASE_TAG" --notes-file "$notes"
+            release_id=$(gh api "repos/${GITHUB_REPOSITORY:?}/releases/tags/$RELEASE_TAG" --jq .id)
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY:?}/releases/$release_id" -F draft=false -F prerelease=false -F make_latest=true >/dev/null
+          fi
 
-          existing=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' || true)
-          while IFS= read -r asset; do
-            [ -n "$asset" ] || continue
-            if printf '%s\n' "$existing" | grep -Fxq "$(basename "$asset")"; then
-              gh release delete-asset "$RELEASE_TAG" "$(basename "$asset")" -y
-            fi
-            gh release upload "$RELEASE_TAG" "$asset"
-          done < <(find "$release_dir" -maxdepth 1 -type f | sort)
+          gh release upload "$RELEASE_TAG" "$release_dir"/* --clobber

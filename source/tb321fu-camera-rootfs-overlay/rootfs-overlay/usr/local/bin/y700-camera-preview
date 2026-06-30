@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+camera="${1:-front}"
+width="${Y700_CAMERA_WIDTH:-640}"
+height="${Y700_CAMERA_HEIGHT:-480}"
+sink="${Y700_CAMERA_SINK:-gtkwaylandsink}"
+
+case "$camera" in
+    main|rear|back|1)
+        name="/base/soc@0/cci@ac15000/i2c-bus@0/camera@11"
+        ;;
+    macro|2)
+        name="/base/soc@0/cci@ac15000/i2c-bus@1/camera@36"
+        ;;
+    front|selfie|3)
+        name="/base/soc@0/cci@ac16000/i2c-bus@0/camera@36"
+        ;;
+    list|--list)
+        echo "main  /base/soc@0/cci@ac15000/i2c-bus@0/camera@11"
+        echo "macro /base/soc@0/cci@ac15000/i2c-bus@1/camera@36"
+        echo "front /base/soc@0/cci@ac16000/i2c-bus@0/camera@36"
+        exit 0
+        ;;
+    -h|--help|help)
+        echo "usage: y700-camera-preview [front|main|macro]"
+        echo "env: Y700_CAMERA_WIDTH=640 Y700_CAMERA_HEIGHT=480 Y700_CAMERA_SINK=gtkwaylandsink"
+        exit 0
+        ;;
+    *)
+        name="$camera"
+        ;;
+esac
+
+exec gst-launch-1.0 -e \
+    libcamerasrc camera-name="$name" \
+    ! video/x-raw,width="$width",height="$height" \
+    ! videoconvert \
+    ! $sink sync=false

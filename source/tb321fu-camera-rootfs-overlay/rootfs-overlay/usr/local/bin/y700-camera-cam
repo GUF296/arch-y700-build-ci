@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/local/bin/y700-camera-env /opt/libcamera-y700/bin/cam "$@"

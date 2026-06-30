@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+prefix="${Y700_LIBCAMERA_PREFIX:-/opt/libcamera-y700}"
+libdir="$prefix/lib/aarch64-linux-gnu"
+
+if [ "$#" -eq 0 ]; then
+    echo "usage: y700-camera-env <command> [args...]" >&2
+    exit 2
+fi
+
+if [ ! -x "$prefix/bin/cam" ]; then
+    echo "y700-camera-env: missing $prefix/bin/cam" >&2
+    exit 1
+fi
+
+export LD_LIBRARY_PATH="$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBCAMERA_IPA_MODULE_PATH="$libdir/libcamera/ipa${LIBCAMERA_IPA_MODULE_PATH:+:$LIBCAMERA_IPA_MODULE_PATH}"
+export LIBCAMERA_IPA_PROXY_PATH="$prefix/libexec/libcamera${LIBCAMERA_IPA_PROXY_PATH:+:$LIBCAMERA_IPA_PROXY_PATH}"
+export LIBCAMERA_IPA_CONFIG_PATH="$prefix/share/libcamera/ipa:$prefix/etc/libcamera/ipa${LIBCAMERA_IPA_CONFIG_PATH:+:$LIBCAMERA_IPA_CONFIG_PATH}"
+export LIBCAMERA_SOFTISP_MODE="${LIBCAMERA_SOFTISP_MODE:-gpu}"
+export GST_PLUGIN_PATH="$libdir/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
+
+exec "$@"

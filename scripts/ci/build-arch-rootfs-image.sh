@@ -32,8 +32,19 @@ Environment inputs:
   DESKTOP_PROFILE             minimal|standard|full, default: standard
   PACKAGE_LIST                additional pacman packages
   INSTALL_FCITX5_CHINESE      default: 1
+  INSTALL_FIREFOX             default: 1
+  INSTALL_CAMERA_APPS         install camera test apps, default: 1
   DEVICE_DEB_ARCHIVE          Y700 device payload archive containing .deb files and overlays
   DEVICE_DEB_DIR              optional local directory containing device .deb files/overlays
+  SENSOR_DEB_ARCHIVE          TB321FU qcom-sns sensor package archive
+  SENSOR_DEB_DIR              optional local directory containing TB321FU sensor packages
+  HAPTICS_DEB_ARCHIVE         TB321FU haptics package archive
+  HAPTICS_DEB_DIR             optional local directory containing TB321FU haptics packages
+  CAMERA_STACK_ARCHIVE        verified TB321FU camera stack source/archive
+  CAMERA_STACK_DIR            optional verified TB321FU camera stack directory
+  BUILD_TB321FU_GPU_SENSOR    build/install TB321FU KSystemStats GPU plugin, default: 1
+  TB321FU_GPU_SENSOR_SOURCE_ARCHIVE source archive containing source/tb321fu-ksystemstats-adreno-freq
+  TB321FU_GPU_SENSOR_SOURCE_DIR     source directory containing the GPU plugin CMake project
   OVERLAY_ARCHIVE             optional rootfs overlay archive
   OVERLAY_DIR                 optional rootfs overlay directory
   KERNEL_VERSION              default: 7.1.1-g5df8e852ea72
@@ -61,6 +72,7 @@ ci_require_cmd sha256sum
 ci_require_cmd chroot
 ci_require_cmd dpkg-deb
 ci_require_cmd depmod
+ci_require_cmd rsync
 
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
 
@@ -85,8 +97,19 @@ LOCALES=${LOCALES:-"en_US.UTF-8 zh_CN.UTF-8"}
 DESKTOP_PROFILE=${DESKTOP_PROFILE:-standard}
 PACKAGE_LIST=${PACKAGE_LIST:-}
 INSTALL_FCITX5_CHINESE=${INSTALL_FCITX5_CHINESE:-1}
+INSTALL_FIREFOX=${INSTALL_FIREFOX:-1}
+INSTALL_CAMERA_APPS=${INSTALL_CAMERA_APPS:-1}
 DEVICE_DEB_ARCHIVE=${DEVICE_DEB_ARCHIVE:-}
 DEVICE_DEB_DIR=${DEVICE_DEB_DIR:-}
+SENSOR_DEB_ARCHIVE=${SENSOR_DEB_ARCHIVE:-}
+SENSOR_DEB_DIR=${SENSOR_DEB_DIR:-}
+HAPTICS_DEB_ARCHIVE=${HAPTICS_DEB_ARCHIVE:-}
+HAPTICS_DEB_DIR=${HAPTICS_DEB_DIR:-}
+CAMERA_STACK_ARCHIVE=${CAMERA_STACK_ARCHIVE:-}
+CAMERA_STACK_DIR=${CAMERA_STACK_DIR:-}
+BUILD_TB321FU_GPU_SENSOR=${BUILD_TB321FU_GPU_SENSOR:-1}
+TB321FU_GPU_SENSOR_SOURCE_ARCHIVE=${TB321FU_GPU_SENSOR_SOURCE_ARCHIVE:-}
+TB321FU_GPU_SENSOR_SOURCE_DIR=${TB321FU_GPU_SENSOR_SOURCE_DIR:-}
 OVERLAY_ARCHIVE=${OVERLAY_ARCHIVE:-}
 OVERLAY_DIR=${OVERLAY_DIR:-}
 KERNEL_VERSION=${KERNEL_VERSION:-7.1.1-g5df8e852ea72}
@@ -234,6 +257,10 @@ arch_chroot() {
   chroot "$rootfs_dir" /usr/bin/env -i \
     HOME=/root \
     TERM=xterm \
+    http_proxy="${http_proxy:-}" \
+    https_proxy="${https_proxy:-}" \
+    HTTP_PROXY="${HTTP_PROXY:-}" \
+    HTTPS_PROXY="${HTTPS_PROXY:-}" \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/bin \
     "$@"
 }
@@ -292,16 +319,36 @@ verify_required_y700_payload() {
     lib/firmware/qcom/vpu/vpu33_p4.mbn
     usr/lib/modules/$KERNEL_VERSION
     usr/lib/modules/$KERNEL_VERSION/modules.dep
-    etc/systemd/system/y700-sns-init.service
-    etc/systemd/system/y700-aw86937-haptics.service
     etc/systemd/system/y700-audio-card-guard.service
-    etc/udev/rules.d/80-y700-iio-sensor-proxy.rules
-    etc/udev/rules.d/90-y700-haptics.rules
-    usr/local/sbin/y700-sns-init.sh
-    usr/local/sbin/y700-aw86937-bind
-    usr/local/libexec/y700-iio-sensor-proxy
+    usr/lib/systemd/system/qcom-sns-init.service
+    etc/systemd/system/multi-user.target.wants/qcom-sns-init.service
+    usr/libexec/qcom-sns/qcom-sns-init
+    usr/share/qcom/sm8650/Lenovo/tb321fu/sensors/registry
+    usr/share/qcom/sm8650/Lenovo/tb321fu/sensors/config
+    usr/share/qcom/conf.d/tb321fu.yaml
+    etc/systemd/system/multi-user.target.wants/iio-sensor-proxy.service
+    etc/systemd/system/iio-sensor-proxy.service.d/99-qcom-sns.conf
+    usr/lib/udev/rules.d/80-tb321fu-qcom-sns.rules
+    usr/lib/systemd/system/tb321fu-haptics.service
+    etc/systemd/system/multi-user.target.wants/tb321fu-haptics.service
+    usr/libexec/tb321fu-haptics/bind-aw86937
+    usr/lib/udev/rules.d/90-tb321fu-haptics.rules
+    usr/lib/modules/$KERNEL_VERSION/extra/aw86937-haptics.ko
+    usr/lib/firmware/haptic_ram.bin
+    usr/lib/firmware/haptic_click.bin
     etc/ld.so.conf.d/y700-device.conf
+    etc/ld.so.conf.d/y700-libcamera.conf
+    opt/libcamera-y700/bin/cam
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7.1
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7.1
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa/ipa_soft_simple.so
+    opt/libcamera-y700/libexec/libcamera/soft_ipa_proxy
+    opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so
     usr/lib/spa-0.2/libcamera/libspa-libcamera.so
+    etc/systemd/user/pipewire.service.d/50-y700-libcamera-ipa.conf
+    etc/systemd/user/pipewire.service.d/60-y700-libcamera-paths.conf
+    etc/systemd/user/wireplumber.service.d/60-y700-libcamera-paths.conf
+    etc/udev/rules.d/70-y700-camera-dma-heap.rules
     usr/share/applications/org.kde.plasma.keyboard.desktop
     etc/xdg/kwinrc
     home/$DEFAULT_USER_NAME/.config/kwinrc
@@ -309,6 +356,10 @@ verify_required_y700_payload() {
   )
   if ci_bool "$INSTALL_FCITX5_CHINESE"; then
     required+=(home/$DEFAULT_USER_NAME/.config/fcitx5/profile)
+  fi
+  if ci_bool "$BUILD_TB321FU_GPU_SENSOR"; then
+    required+=(usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_tb321fu_gpu.so)
+    required+=(usr/share/tb321fu-ksystemstats-gpu/ksystemstats_plugin_tb321fu_gpu.so.sha256)
   fi
 
   local rel
@@ -318,6 +369,32 @@ verify_required_y700_payload() {
 
   [ -n "$(find "$root/usr/lib/modules/$KERNEL_VERSION" -type f -name '*.ko*' -print -quit)" ] || \
     ci_die "no kernel modules found for $KERNEL_VERSION"
+
+  local forbidden=(
+    etc/systemd/system/iio-sensor-proxy.service.d/10-y700-ssc.conf
+    etc/systemd/system/y700-sns-init.service
+    etc/systemd/system/y700-aw86937-haptics.service
+    usr/lib/systemd/system/y700-sns-init.service
+    usr/lib/systemd/system/y700-aw86937-haptics.service
+    etc/systemd/system/multi-user.target.wants/y700-sns-init.service
+    etc/systemd/system/multi-user.target.wants/y700-aw86937-haptics.service
+    etc/udev/rules.d/80-y700-iio-sensor-proxy.rules
+    etc/udev/rules.d/90-y700-haptics.rules
+    usr/lib/udev/rules.d/80-y700-iio-sensor-proxy.rules
+    usr/lib/udev/rules.d/90-y700-haptics.rules
+    usr/local/sbin/y700-sns-init.sh
+    usr/local/sbin/y700-aw86937-bind
+    usr/local/libexec/y700-iio-sensor-proxy
+    usr/local/lib/y700-sns
+    usr/local/share/y700-sns
+    etc/udev/rules.d/70-y700-dma-heap.rules
+    usr/local/libexec/y700-display-rotation-update
+    usr/local/libexec/y700-display-rotation-dbus
+    usr/local/bin/y700-display-rotation-sync
+  )
+  for rel in "${forbidden[@]}"; do
+    [ ! -e "$root/$rel" ] && [ ! -L "$root/$rel" ] || ci_die "legacy Y700 payload must not be present: /$rel"
+  done
 }
 
 apply_y700_audio_policy_fixes() {
@@ -350,14 +427,60 @@ CONF
   chmod 0644 "$conf"
 }
 
+remove_legacy_y700_payload() {
+  local root=$1
+
+  rm -f \
+    "$root/etc/systemd/system/iio-sensor-proxy.service.d/10-y700-ssc.conf" \
+    "$root/etc/systemd/system/y700-sns-init.service" \
+    "$root/etc/systemd/system/y700-aw86937-haptics.service" \
+    "$root/usr/lib/systemd/system/y700-sns-init.service" \
+    "$root/usr/lib/systemd/system/y700-aw86937-haptics.service" \
+    "$root/etc/udev/rules.d/80-y700-iio-sensor-proxy.rules" \
+    "$root/etc/udev/rules.d/90-y700-haptics.rules" \
+    "$root/usr/lib/udev/rules.d/80-y700-iio-sensor-proxy.rules" \
+    "$root/usr/lib/udev/rules.d/90-y700-haptics.rules" \
+    "$root/usr/local/sbin/y700-sns-init.sh" \
+    "$root/usr/local/libexec/y700-iio-sensor-proxy" \
+    "$root/usr/local/sbin/y700-aw86937-bind"
+  rm -rf \
+    "$root/usr/local/lib/y700-sns" \
+    "$root/usr/local/share/y700-sns"
+
+  if [ -d "$root/etc/systemd/system/multi-user.target.wants" ]; then
+    rm -f \
+      "$root/etc/systemd/system/multi-user.target.wants/y700-sns-init.service" \
+      "$root/etc/systemd/system/multi-user.target.wants/y700-aw86937-haptics.service"
+  fi
+}
+
+remove_legacy_camera_payload() {
+  local root=$1
+
+  rm -f \
+    "$root/etc/udev/rules.d/70-y700-dma-heap.rules" \
+    "$root/etc/y700-camera-display-transform-mode" \
+    "$root/etc/y700-camera-display-rotation-base" \
+    "$root/etc/systemd/user/y700-display-rotation-update.path" \
+    "$root/etc/systemd/user/y700-display-rotation-update.service" \
+    "$root/etc/systemd/user/y700-display-rotation-dbus.service" \
+    "$root/etc/systemd/user/y700-display-rotation-sync.service" \
+    "$root/usr/local/libexec/y700-display-rotation-update" \
+    "$root/usr/local/libexec/y700-display-rotation-dbus" \
+    "$root/usr/local/bin/y700-display-rotation-sync"
+  rm -rf "$root/run/y700-camera-display-rotation"
+}
+
+rsync_stage_to_rootfs() {
+  local stage=$1
+  rsync -aH --numeric-ids "$stage"/ "$rootfs_dir"/
+}
+
 enable_y700_device_services() {
   local root=$1
 
   install -d -m 0755 "$root/etc/systemd/system/multi-user.target.wants"
-  for service in \
-    y700-sns-init.service \
-    y700-aw86937-haptics.service \
-    y700-audio-card-guard.service; do
+  for service in y700-audio-card-guard.service; do
     if [ -f "$root/etc/systemd/system/$service" ]; then
       ln -sfn "/etc/systemd/system/$service" \
         "$root/etc/systemd/system/multi-user.target.wants/$service"
@@ -372,33 +495,48 @@ enable_y700_device_services() {
     ln -sfn /usr/lib/systemd/system/tb321fu-haptics.service \
       "$root/etc/systemd/system/multi-user.target.wants/tb321fu-haptics.service"
   fi
-
-  if [ -f "$root/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" ]; then
-    install -d -m 0755 "$root/usr/lib/spa-0.2/libcamera"
-    cp -a "$root/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" \
-      "$root/usr/lib/spa-0.2/libcamera/libspa-libcamera.so"
+  if [ -f "$root/usr/lib/systemd/system/iio-sensor-proxy.service" ]; then
+    ln -sfn /usr/lib/systemd/system/iio-sensor-proxy.service \
+      "$root/etc/systemd/system/multi-user.target.wants/iio-sensor-proxy.service"
   fi
 }
 
 extract_device_payload_dir() {
   local payload_dir=$1
-  local deb overlay
+  local deb overlay stage
 
-  if ! find "$payload_dir" -type f \( -name '*.deb' -o -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' -o -name '*.tar.zst' \) | grep -q .; then
+  if [ -z "$(find "$payload_dir" -type f \( -name '*.deb' -o -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' -o -name '*.tar.zst' \) -print -quit)" ]; then
     ci_die "device payload directory has no supported payload files: $payload_dir"
   fi
 
   while IFS= read -r -d '' deb; do
     ci_log "extracting device deb data: $(basename "$deb")"
-    dpkg-deb -x "$deb" "$rootfs_dir"
+    stage="$work_dir/device-stage-$(basename "$deb").d"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    dpkg-deb -x "$deb" "$stage"
+    remove_legacy_y700_payload "$stage"
+    remove_legacy_camera_payload "$stage"
+    rsync_stage_to_rootfs "$stage"
   done < <(find "$payload_dir" -type f -name '*.deb' -print0 | sort -z)
 
   while IFS= read -r -d '' overlay; do
     case "$overlay" in
-      *.tar) ci_log "extracting device overlay: $(basename "$overlay")"; tar -C "$rootfs_dir" -xf "$overlay" ;;
-      *.tar.gz|*.tgz) ci_log "extracting device overlay: $(basename "$overlay")"; tar -C "$rootfs_dir" -xzf "$overlay" ;;
-      *.tar.xz) ci_log "extracting device overlay: $(basename "$overlay")"; tar -C "$rootfs_dir" -xJf "$overlay" ;;
-      *.tar.zst) ci_log "extracting device overlay: $(basename "$overlay")"; tar -C "$rootfs_dir" --zstd -xf "$overlay" ;;
+      *.tar|*.tar.gz|*.tgz|*.tar.xz|*.tar.zst)
+        ci_log "extracting device overlay: $(basename "$overlay")"
+        stage="$work_dir/device-overlay-stage-$(basename "$overlay").d"
+        rm -rf "$stage"
+        mkdir -p "$stage"
+        case "$overlay" in
+          *.tar) tar -C "$stage" -xf "$overlay" ;;
+          *.tar.gz|*.tgz) tar -C "$stage" -xzf "$overlay" ;;
+          *.tar.xz) tar -C "$stage" -xJf "$overlay" ;;
+          *.tar.zst) tar -C "$stage" --zstd -xf "$overlay" ;;
+        esac
+        remove_legacy_y700_payload "$stage"
+        remove_legacy_camera_payload "$stage"
+        rsync_stage_to_rootfs "$stage"
+        ;;
     esac
   done < <(find "$payload_dir" -type f \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' -o -name '*.tar.zst' \) -print0 | sort -z)
 }
@@ -416,6 +554,202 @@ apply_device_payloads() {
   if [ -n "$DEVICE_DEB_DIR" ]; then
     ci_log "applying device payload directory: $DEVICE_DEB_DIR"
     extract_device_payload_dir "$DEVICE_DEB_DIR"
+  fi
+}
+
+extract_tb321fu_deb_payload_dir() {
+  local payload_dir=$1
+  local label=$2
+  local deb stage found=0
+
+  while IFS= read -r -d '' deb; do
+    found=1
+    ci_log "extracting $label deb data: $(basename "$deb")"
+    stage="$work_dir/${label}-stage-$(basename "$deb").d"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    dpkg-deb -x "$deb" "$stage"
+    remove_legacy_y700_payload "$stage"
+    remove_legacy_camera_payload "$stage"
+    rsync_stage_to_rootfs "$stage"
+  done < <(find "$payload_dir" -type f -name '*.deb' -print0 | sort -z)
+
+  [ "$found" = 1 ] || ci_die "$label payload directory has no .deb files: $payload_dir"
+}
+
+apply_tb321fu_deb_payloads() {
+  local archive extract
+
+  if [ -n "$SENSOR_DEB_ARCHIVE" ]; then
+    archive="$work_dir/sensor-payload.archive"
+    extract="$work_dir/sensor-payload"
+    ci_log "downloading TB321FU sensor package archive: $SENSOR_DEB_ARCHIVE"
+    ci_download "$SENSOR_DEB_ARCHIVE" "$archive"
+    ci_extract_archive "$archive" "$extract"
+    extract_tb321fu_deb_payload_dir "$extract" sensor
+  fi
+  if [ -n "$SENSOR_DEB_DIR" ]; then
+    extract_tb321fu_deb_payload_dir "$SENSOR_DEB_DIR" sensor
+  fi
+
+  if [ -n "$HAPTICS_DEB_ARCHIVE" ]; then
+    archive="$work_dir/haptics-payload.archive"
+    extract="$work_dir/haptics-payload"
+    ci_log "downloading TB321FU haptics package archive: $HAPTICS_DEB_ARCHIVE"
+    ci_download "$HAPTICS_DEB_ARCHIVE" "$archive"
+    ci_extract_archive "$archive" "$extract"
+    extract_tb321fu_deb_payload_dir "$extract" haptics
+  fi
+  if [ -n "$HAPTICS_DEB_DIR" ]; then
+    extract_tb321fu_deb_payload_dir "$HAPTICS_DEB_DIR" haptics
+  fi
+}
+
+find_camera_source_root() {
+  local root=$1 found
+
+  if [ -d "$root/rootfs-overlay/opt/libcamera-y700" ] && \
+     [ -f "$root/rootfs-overlay/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" ]; then
+    printf '%s\n' "$root/rootfs-overlay"
+    return 0
+  fi
+  if [ -d "$root/opt/libcamera-y700" ] && \
+     [ -f "$root/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" ]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+
+  found=$(find "$root" -type f -path '*/rootfs-overlay/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so' -print -quit)
+  if [ -n "$found" ]; then
+    found=${found%/rootfs-overlay/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so}
+    [ -d "$found/rootfs-overlay/opt/libcamera-y700" ] || return 1
+    printf '%s\n' "$found/rootfs-overlay"
+    return 0
+  fi
+
+  found=$(find "$root" -type f -path '*/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so' -print -quit)
+  if [ -n "$found" ]; then
+    found=${found%/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so}
+    [ -d "$found/opt/libcamera-y700" ] || return 1
+    printf '%s\n' "$found"
+    return 0
+  fi
+
+  return 1
+}
+
+apply_tb321fu_camera_stack() {
+  local source_root archive extract stage
+
+  if [ -n "$CAMERA_STACK_ARCHIVE" ]; then
+    archive="$work_dir/camera-stack.archive"
+    extract="$work_dir/camera-stack"
+    ci_log "downloading TB321FU camera stack archive: $CAMERA_STACK_ARCHIVE"
+    ci_download "$CAMERA_STACK_ARCHIVE" "$archive"
+    ci_extract_archive "$archive" "$extract"
+    source_root=$(find_camera_source_root "$extract") || ci_die "CAMERA_STACK_ARCHIVE does not contain verified camera stack"
+  elif [ -n "$CAMERA_STACK_DIR" ]; then
+    source_root=$(find_camera_source_root "$CAMERA_STACK_DIR") || ci_die "CAMERA_STACK_DIR does not contain verified camera stack"
+  elif [ -d "$REPO_ROOT/source/tb321fu-camera-rootfs-overlay" ]; then
+    source_root=$(find_camera_source_root "$REPO_ROOT/source/tb321fu-camera-rootfs-overlay") || ci_die "repository camera stack overlay is incomplete"
+  else
+    ci_die "set CAMERA_STACK_ARCHIVE/CAMERA_STACK_DIR or add source/tb321fu-camera-rootfs-overlay"
+  fi
+
+  ci_log "applying TB321FU camera stack: $source_root"
+  stage="$work_dir/camera-stack-stage"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  rsync -aH --numeric-ids "$source_root"/ "$stage"/
+  remove_legacy_camera_payload "$stage"
+  rsync_stage_to_rootfs "$stage"
+}
+
+adapt_ubuntu_multilib_paths_for_arch() {
+  local root=$1
+
+  if [ -d "$root/usr/lib/aarch64-linux-gnu" ]; then
+    rsync -aH "$root/usr/lib/aarch64-linux-gnu"/ "$root/usr/lib"/
+  fi
+
+  if [ -f "$root/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" ]; then
+    install -d -m 0755 "$root/usr/lib/spa-0.2/libcamera"
+    cp -a "$root/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" \
+      "$root/usr/lib/spa-0.2/libcamera/libspa-libcamera.so"
+  fi
+  if [ -f "$root/opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so" ]; then
+    install -d -m 0755 "$root/usr/lib/gstreamer-1.0"
+    ln -sfn /opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so \
+      "$root/usr/lib/gstreamer-1.0/libgstlibcamera.so"
+  fi
+}
+
+find_gpu_sensor_source_root() {
+  local root=$1 found
+
+  if [ -f "$root/CMakeLists.txt" ] && [ -f "$root/tb321fu_gpu.cpp" ] && [ -f "$root/metadata.json" ]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if [ -d "$root/source/tb321fu-ksystemstats-adreno-freq" ]; then
+    find_gpu_sensor_source_root "$root/source/tb321fu-ksystemstats-adreno-freq"
+    return $?
+  fi
+  found=$(find "$root" -type f -path '*/tb321fu-ksystemstats-adreno-freq/CMakeLists.txt' -print -quit)
+  [ -n "$found" ] || return 1
+  found=${found%/CMakeLists.txt}
+  [ -f "$found/tb321fu_gpu.cpp" ] || return 1
+  [ -f "$found/metadata.json" ] || return 1
+  printf '%s\n' "$found"
+}
+
+apply_tb321fu_gpu_sensor() {
+  local root=$1 source_root archive extract rootfs_src rootfs_build plugin_rel stock_plugin_rel disabled_stock_plugin_rel
+  local had_stock_plugin=0
+
+  if [ -n "$TB321FU_GPU_SENSOR_SOURCE_ARCHIVE" ]; then
+    archive="$work_dir/gpu-sensor-source.archive"
+    extract="$work_dir/gpu-sensor-source"
+    ci_log "downloading TB321FU GPU sensor source archive: $TB321FU_GPU_SENSOR_SOURCE_ARCHIVE"
+    ci_download "$TB321FU_GPU_SENSOR_SOURCE_ARCHIVE" "$archive"
+    ci_extract_archive "$archive" "$extract"
+    source_root=$(find_gpu_sensor_source_root "$extract") || ci_die "GPU sensor source archive is missing expected project"
+  elif [ -n "$TB321FU_GPU_SENSOR_SOURCE_DIR" ]; then
+    source_root=$(find_gpu_sensor_source_root "$TB321FU_GPU_SENSOR_SOURCE_DIR") || ci_die "GPU sensor source dir is missing expected project"
+  else
+    source_root=$(find_gpu_sensor_source_root "$REPO_ROOT/source/tb321fu-ksystemstats-adreno-freq") || ci_die "repository GPU sensor source is missing"
+  fi
+
+  ci_log "building TB321FU KSystemStats Adreno GPU frequency plugin"
+  rootfs_src=/tmp/tb321fu-ksystemstats-adreno-freq-src
+  rootfs_build=/tmp/tb321fu-ksystemstats-adreno-freq-build
+  plugin_rel=usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_tb321fu_gpu.so
+  stock_plugin_rel=usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so
+  disabled_stock_plugin_rel=$stock_plugin_rel.disabled-tb321fu-adreno
+
+  rm -rf "$root$rootfs_src" "$root$rootfs_build"
+  install -d -m 0755 "$root$rootfs_src"
+  rsync -a --delete "$source_root"/ "$root$rootfs_src"/
+
+  arch_chroot /usr/bin/cmake -S "$rootfs_src" -B "$rootfs_build" \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_INSTALL_PREFIX=/usr
+  arch_chroot /usr/bin/cmake --build "$rootfs_build" -j"${TB321FU_GPU_SENSOR_BUILD_JOBS:-2}"
+  arch_chroot /usr/bin/cmake --install "$rootfs_build"
+
+  rm -rf "$root$rootfs_src" "$root$rootfs_build"
+  if [ -f "$root/$stock_plugin_rel" ]; then
+    had_stock_plugin=1
+    rm -f "$root/$disabled_stock_plugin_rel"
+    mv "$root/$stock_plugin_rel" "$root/$disabled_stock_plugin_rel"
+  fi
+  install -d -m 0755 "$root/usr/share/tb321fu-ksystemstats-gpu"
+  sha256sum "$root/$plugin_rel" > "$root/usr/share/tb321fu-ksystemstats-gpu/ksystemstats_plugin_tb321fu_gpu.so.sha256"
+
+  [ -f "$root/$plugin_rel" ] || ci_die "TB321FU GPU sensor plugin missing after build: /$plugin_rel"
+  [ ! -e "$root/$stock_plugin_rel" ] || ci_die "stock KSystemStats GPU plugin still enabled: /$stock_plugin_rel"
+  if [ "$had_stock_plugin" = 1 ]; then
+    [ -f "$root/$disabled_stock_plugin_rel" ] || ci_die "disabled stock KSystemStats GPU plugin missing: /$disabled_stock_plugin_rel"
   fi
 }
 
@@ -576,9 +910,9 @@ build_package_list() {
     nano vim less which file htop usbutils pciutils iproute2 inetutils
     networkmanager bluez bluez-utils power-profiles-daemon udisks2 upower
     linux-firmware
-    alsa-ucm-conf alsa-utils iio-sensor-proxy
+    alsa-ucm-conf alsa-utils iio-sensor-proxy feedbackd
     glib2 libgudev polkit protobuf-c libqmi libqrtr-glib
-    libevent libyaml gstreamer gst-plugins-base-libs gtk3 gdk-pixbuf2 libunwind elfutils gnutls libglvnd
+    libevent libyaml gstreamer gst-plugins-base gst-plugins-base-libs gst-plugins-good gst-plugin-libcamera gtk3 gdk-pixbuf2 libunwind elfutils gnutls libglvnd
     mesa vulkan-freedreno vulkan-tools
     pipewire pipewire-alsa pipewire-pulse wireplumber
   )
@@ -592,6 +926,9 @@ build_package_list() {
   local fcitx_packages=(
     fcitx5 fcitx5-chinese-addons fcitx5-configtool fcitx5-qt fcitx5-gtk fcitx5-material-color
   )
+  local browser_packages=(firefox)
+  local camera_app_packages=(snapshot kamoso)
+  local gpu_sensor_build_packages=(cmake extra-cmake-modules gcc make libksysguard ksystemstats qt6-base kcoreaddons ki18n)
   local packages=("${base_packages[@]}")
 
   case "$DESKTOP_PROFILE" in
@@ -609,6 +946,15 @@ build_package_list() {
 
   if ci_bool "$INSTALL_FCITX5_CHINESE"; then
     packages+=("${fcitx_packages[@]}")
+  fi
+  if ci_bool "$INSTALL_FIREFOX"; then
+    packages+=("${browser_packages[@]}")
+  fi
+  if ci_bool "$INSTALL_CAMERA_APPS"; then
+    packages+=("${camera_app_packages[@]}")
+  fi
+  if ci_bool "$BUILD_TB321FU_GPU_SENSOR"; then
+    packages+=("${gpu_sensor_build_packages[@]}")
   fi
   if [ -n "$PACKAGE_LIST" ]; then
     # shellcheck disable=SC2206
@@ -637,6 +983,15 @@ install -d -m 0755 "$rootfs_dir/etc/pacman.d" "$rootfs_dir/etc/systemd/system"
 printf 'Server = %s\n' "$ARCH_MIRROR" > "$rootfs_dir/etc/pacman.d/mirrorlist"
 rm -f "$rootfs_dir/etc/resolv.conf"
 cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
+if ! awk '
+  /^[[:space:]]*nameserver[[:space:]]+/ {
+    ns=$2
+    if (ns !~ /^(127\.|::1$|0\.0\.0\.0$)/) good=1
+  }
+  END { exit good ? 0 : 1 }
+' "$rootfs_dir/etc/resolv.conf"; then
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$rootfs_dir/etc/resolv.conf"
+fi
 
 mount_chroot_runtime
 
@@ -733,13 +1088,14 @@ CONF
 fi
 
 apply_device_payloads
+apply_tb321fu_deb_payloads
+apply_tb321fu_camera_stack
+adapt_ubuntu_multilib_paths_for_arch "$rootfs_dir"
 
 cat > "$rootfs_dir/etc/ld.so.conf.d/y700-device.conf" <<'LDSO'
-/usr/local/lib/y700-sns
 /opt/libcamera-y700/lib/aarch64-linux-gnu
 /usr/lib/aarch64-linux-gnu
 LDSO
-arch_chroot /usr/bin/ldconfig
 
 if [ -n "$OVERLAY_ARCHIVE" ]; then
   tmp_overlay="$work_dir/overlay.archive"
@@ -752,6 +1108,9 @@ if [ -n "$OVERLAY_DIR" ]; then
   rsync -aHAX --numeric-ids "$OVERLAY_DIR"/ "$rootfs_dir"/
 fi
 
+remove_legacy_y700_payload "$rootfs_dir"
+remove_legacy_camera_payload "$rootfs_dir"
+
 enable_y700_device_services "$rootfs_dir"
 if ci_bool "$APPLY_Y700_FIRMWARE_FIXES"; then
   apply_y700_firmware_fixes "$rootfs_dir"
@@ -759,9 +1118,13 @@ fi
 if ci_bool "$APPLY_Y700_AUDIO_POLICY_FIXES"; then
   apply_y700_audio_policy_fixes "$rootfs_dir"
 fi
+if ci_bool "$BUILD_TB321FU_GPU_SENSOR"; then
+  apply_tb321fu_gpu_sensor "$rootfs_dir"
+fi
 
 ci_log "generating module dependency files for $KERNEL_VERSION"
 depmod -b "$rootfs_dir" "$KERNEL_VERSION"
+arch_chroot /usr/bin/ldconfig
 
 rm -rf "$rootfs_dir/var/cache/pacman/pkg"/* "$rootfs_dir/tmp"/* "$rootfs_dir/var/tmp"/*
 rm -f \
@@ -791,8 +1154,19 @@ sddm_autologin_session=$SDDM_AUTOLOGIN_SESSION
 lang=$LANG_NAME
 locales=$LOCALES
 install_fcitx5_chinese=$INSTALL_FCITX5_CHINESE
+install_firefox=$INSTALL_FIREFOX
+install_camera_apps=$INSTALL_CAMERA_APPS
 device_deb_archive=${DEVICE_DEB_ARCHIVE:-}
 device_deb_dir=${DEVICE_DEB_DIR:-}
+sensor_deb_archive=${SENSOR_DEB_ARCHIVE:-}
+sensor_deb_dir=${SENSOR_DEB_DIR:-}
+haptics_deb_archive=${HAPTICS_DEB_ARCHIVE:-}
+haptics_deb_dir=${HAPTICS_DEB_DIR:-}
+camera_stack_archive=${CAMERA_STACK_ARCHIVE:-}
+camera_stack_dir=${CAMERA_STACK_DIR:-}
+build_tb321fu_gpu_sensor=$BUILD_TB321FU_GPU_SENSOR
+tb321fu_gpu_sensor_source_archive=${TB321FU_GPU_SENSOR_SOURCE_ARCHIVE:-}
+tb321fu_gpu_sensor_source_dir=${TB321FU_GPU_SENSOR_SOURCE_DIR:-repo-default}
 overlay_archive=${OVERLAY_ARCHIVE:-}
 overlay_dir=${OVERLAY_DIR:-}
 kernel_version=$KERNEL_VERSION
