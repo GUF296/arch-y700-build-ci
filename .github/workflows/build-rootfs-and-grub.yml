@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release tag to create/update. Leave empty to only upload Actions artifacts.
+        description: Reserved; tagged Arch releases are disabled until a content-locked repository/package closure is supplied. Leave empty for artifact-only output.
         required: false
         type: string
       prerelease:
@@ -20,11 +20,12 @@ on:
       arch_rootfs_url:
         description: Arch Linux ARM aarch64 rootfs tarball URL.
         required: true
-        default: https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+        default: https://ca.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
         type: string
       arch_rootfs_sha256:
         description: Required SHA-256 for the selected Arch Linux ARM rootfs tarball.
         required: true
+        default: 42a4eeaa038994ffd31fa173256ef2f0ef511358eeb41b9ea1f8626391b9b319
         type: string
       desktop_profile:
         description: Plasma package profile. standard is recommended for first builds.
@@ -87,7 +88,11 @@ jobs:
           python3 scripts/ci/check-service-enable-policy.py --self-test
           python3 scripts/ci/check-service-enable-policy.py scripts/ci/build-arch-rootfs-image.sh
           python3 scripts/ci/test-safe-extract-archive.py
+          python3 scripts/ci/test-imported-deb-boundaries.py
+          bash scripts/ci/test-arch-import-boundaries.sh
+          bash scripts/ci/test-proxy-boundaries.sh
           bash scripts/ci/test-input-and-path-boundaries.sh
+          bash scripts/ci/test-release-input-provenance.sh
           bash scripts/ci/test-system-payload-policy.sh
           bash scripts/ci/test-audio-route-reconciliation.sh
           bash scripts/ci/test-native-package-lifecycle.sh
@@ -114,6 +119,12 @@ jobs:
             dosfstools mtools e2fsprogs rsync curl unzip tar xz-utils zstd p7zip-full \
             gdisk qemu-utils sudo ca-certificates gnupg binutils dpkg-dev kmod
 
+      - name: Validate GRUB FAT image closure
+        run: |
+          set -euo pipefail
+          bash scripts/ci/test-grub-template-policy.sh
+          bash scripts/ci/test-grub-image-integrity.sh
+
       - name: Apply workflow configuration
         env:
           INPUT_OUTPUT_PREFIX: ${{ inputs.output_prefix }}
@@ -131,9 +142,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/build-config-notes"
 
           cat > "$RUNNER_TEMP/rootfs.env" <<'CONFIG_EOF'
-          ARCH_ROOTFS_URL=https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
-          ARCH_ROOTFS_SHA256=
-          ARCH_MIRROR=http://os.archlinuxarm.org/$arch/$repo
+          ARCH_ROOTFS_URL=https://ca.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+          ARCH_ROOTFS_SHA256=42a4eeaa038994ffd31fa173256ef2f0ef511358eeb41b9ea1f8626391b9b319
+          ARCH_MIRROR=https://ca.us.mirror.archlinuxarm.org/$arch/$repo
           ROOTFS_IMAGE_SIZE=20G
           ROOTFS_LABEL=ArchLinux
           ROOTFS_PARTLABEL=userdata
@@ -186,8 +197,10 @@ jobs:
           BOOT_IMAGE_SIZE=256M
           BOOT_FAT_BITS=32
           BOOT_FAT_LABEL=Y700GRUB
+          BOOT_FAT_VOLUME_ID=00000000
           BOOT_SECTOR_SIZE=512
           BOOT_CLUSTER_SECTORS=
+          GRUB_TIMEOUT=3
           ROOT_SELECTOR=partlabel
           ROOT_PARTLABEL=userdata
           ROOT_UUID=
@@ -197,6 +210,7 @@ jobs:
           BOOT_COMPRESS=7z
           BOOT_CHUNK_SIZE=
           KEEP_BOOT_IMAGE=0
+          Y700_DIRECT_BOOT_RESERVED_MEMORY=/reserved-memory/qdss@82800000 /reserved-memory/splash-region /reserved-memory/trust-ui-vm@f3800000 /reserved-memory/oem-vm@f7c00000
           CONFIG_EOF
 
           cat > "$RUNNER_TEMP/source.env" <<'CONFIG_EOF'
@@ -208,8 +222,8 @@ jobs:
           QCOMRAMP_EFI_URL=
           QCOMRAMP_EFI_SHA256=
           QCOMRAMP_CFG_NAME=qcomramp.cfg
-          GRUB_BUILD_ARCHIVE=
-          GRUB_BUILD_ARCHIVE_SHA256=
+          Y700_DIRECT_BOOT_EFI_NAME=QCOMRAMP.EFI
+          Y700_GRUB_BUILD_DIR=
           DTB_NAME=sm8650-lenovo-tb321fu.dtb
           CONFIG_EOF
 
@@ -243,6 +257,15 @@ jobs:
           echo "OUTPUT_DIR_ROOTFS=out/ci-rootfs" >> "$GITHUB_ENV"
           echo "OUTPUT_DIR_GRUB=out/ci-grub" >> "$GITHUB_ENV"
 
+      - name: Validate release input provenance
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PRERELEASE: ${{ inputs.prerelease && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/validate-release-input-provenance.sh
+
       - name: Build rootfs image
         env:
           DEFAULT_USER_PASSWORD_HASH: ${{ secrets.DEFAULT_USER_PASSWORD_HASH }}
@@ -250,14 +273,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$OUTPUT_DIR_ROOTFS"
-          sudo --preserve-env=OUTPUT_PREFIX,ARCH_ROOTFS_URL,ARCH_ROOTFS_SHA256,ARCH_MIRROR,http_proxy,https_proxy,HTTP_PROXY,HTTPS_PROXY,ROOTFS_IMAGE_SIZE,ROOTFS_LABEL,ROOTFS_PARTLABEL,HOSTNAME_NAME,DEFAULT_USER_NAME,DEFAULT_USER_PASSWORD_HASH,ROOT_PASSWORD_MODE,ROOT_PASSWORD_HASH,USER_SUDO_MODE,SDDM_AUTOLOGIN,SDDM_AUTOLOGIN_SESSION,TZ_REGION,LOCALES,LANG_NAME,DESKTOP_PROFILE,PACKAGE_LIST,INSTALL_FCITX5_CHINESE,INSTALL_FIREFOX,INSTALL_CAMERA_APPS,DEVICE_DEB_ARCHIVE,DEVICE_DEB_ARCHIVE_SHA256,DEVICE_DEB_DIR,SENSOR_DEB_ARCHIVE,SENSOR_DEB_ARCHIVE_SHA256,SENSOR_DEB_DIR,HAPTICS_DEB_ARCHIVE,HAPTICS_DEB_ARCHIVE_SHA256,HAPTICS_DEB_DIR,CAMERA_STACK_ARCHIVE,CAMERA_STACK_ARCHIVE_SHA256,CAMERA_STACK_DIR,BUILD_TB321FU_GPU_SENSOR,TB321FU_GPU_SENSOR_SOURCE_ARCHIVE,TB321FU_GPU_SENSOR_SOURCE_ARCHIVE_SHA256,TB321FU_GPU_SENSOR_SOURCE_DIR,TB321FU_GPU_SENSOR_BUILD_JOBS,OVERLAY_ARCHIVE,OVERLAY_ARCHIVE_SHA256,OVERLAY_DIR,KERNEL_VERSION,APPLY_Y700_FIRMWARE_FIXES,APPLY_Y700_AUDIO_POLICY_FIXES,COMPRESS,CHUNK_SIZE,KEEP_RAW_IMAGE \
+          sudo --preserve-env=OUTPUT_PREFIX,ARCH_ROOTFS_URL,ARCH_ROOTFS_SHA256,ARCH_MIRROR,http_proxy,https_proxy,HTTP_PROXY,HTTPS_PROXY,CI_HTTP_PROXY,CI_HTTPS_PROXY,CI_DOWNLOAD_MAX_ATTEMPTS,CI_DOWNLOAD_DEADLINE_SECONDS,ROOTFS_IMAGE_SIZE,ROOTFS_LABEL,ROOTFS_PARTLABEL,HOSTNAME_NAME,DEFAULT_USER_NAME,DEFAULT_USER_PASSWORD_HASH,ROOT_PASSWORD_MODE,ROOT_PASSWORD_HASH,USER_SUDO_MODE,SDDM_AUTOLOGIN,SDDM_AUTOLOGIN_SESSION,TZ_REGION,LOCALES,LANG_NAME,DESKTOP_PROFILE,PACKAGE_LIST,INSTALL_FCITX5_CHINESE,INSTALL_FIREFOX,INSTALL_CAMERA_APPS,DEVICE_DEB_ARCHIVE,DEVICE_DEB_ARCHIVE_SHA256,DEVICE_DEB_DIR,SENSOR_DEB_ARCHIVE,SENSOR_DEB_ARCHIVE_SHA256,SENSOR_DEB_DIR,HAPTICS_DEB_ARCHIVE,HAPTICS_DEB_ARCHIVE_SHA256,HAPTICS_DEB_DIR,CAMERA_STACK_ARCHIVE,CAMERA_STACK_ARCHIVE_SHA256,CAMERA_STACK_DIR,BUILD_TB321FU_GPU_SENSOR,TB321FU_GPU_SENSOR_SOURCE_ARCHIVE,TB321FU_GPU_SENSOR_SOURCE_ARCHIVE_SHA256,TB321FU_GPU_SENSOR_SOURCE_DIR,TB321FU_GPU_SENSOR_BUILD_JOBS,OVERLAY_ARCHIVE,OVERLAY_ARCHIVE_SHA256,OVERLAY_DIR,KERNEL_VERSION,APPLY_Y700_FIRMWARE_FIXES,APPLY_Y700_AUDIO_POLICY_FIXES,COMPRESS,CHUNK_SIZE,KEEP_RAW_IMAGE \
             env OUTPUT_DIR="$OUTPUT_DIR_ROOTFS" bash scripts/ci/build-arch-rootfs-image.sh
 
       - name: Build GRUB boot image
         run: |
           set -euo pipefail
           mkdir -p "$OUTPUT_DIR_GRUB"
-          sudo --preserve-env=OUTPUT_PREFIX,BOOT_TEMPLATE_IMAGE,BOOT_TEMPLATE_IMAGE_URL,BOOT_TEMPLATE_IMAGE_SHA256,BOOT_IMAGE_SIZE,BOOT_FAT_BITS,BOOT_FAT_LABEL,BOOT_SECTOR_SIZE,BOOT_CLUSTER_SECTORS,KERNEL_ARTIFACT_ARCHIVE,KERNEL_ARTIFACT_ARCHIVE_SHA256,BOOTAA64_EFI_URL,BOOTAA64_EFI_SHA256,QCOMRAMP_EFI,QCOMRAMP_EFI_URL,QCOMRAMP_EFI_SHA256,QCOMRAMP_CFG_NAME,DTB_NAME,ROOT_SELECTOR,ROOT_PARTLABEL,ROOT_UUID,ROOTARGS,ROOTARGS_EXTRA,STABLEARGS,BOOT_COMPRESS,BOOT_CHUNK_SIZE,KEEP_BOOT_IMAGE,http_proxy,https_proxy,HTTP_PROXY,HTTPS_PROXY \
+          sudo --preserve-env=OUTPUT_PREFIX,BOOT_TEMPLATE_IMAGE,BOOT_TEMPLATE_IMAGE_URL,BOOT_TEMPLATE_IMAGE_SHA256,BOOT_IMAGE_SIZE,BOOT_FAT_BITS,BOOT_FAT_LABEL,BOOT_FAT_VOLUME_ID,BOOT_SECTOR_SIZE,BOOT_CLUSTER_SECTORS,GRUB_TIMEOUT,Y700_DIRECT_BOOT_EFI_NAME,Y700_DIRECT_BOOT_RESERVED_MEMORY,Y700_GRUB_BUILD_DIR,KERNEL_ARTIFACT_ARCHIVE,KERNEL_ARTIFACT_ARCHIVE_SHA256,KERNEL_IMAGE,DTB_FILE,KERNEL_CONFIG,BOOTAA64_EFI,BOOTAA64_EFI_URL,BOOTAA64_EFI_SHA256,QCOMRAMP_EFI,QCOMRAMP_EFI_URL,QCOMRAMP_EFI_SHA256,QCOMRAMP_CFG_NAME,DTB_NAME,ROOT_SELECTOR,ROOT_PARTLABEL,ROOT_UUID,ROOTARGS,ROOTARGS_EXTRA,STABLEARGS,BOOT_COMPRESS,BOOT_CHUNK_SIZE,KEEP_BOOT_IMAGE,http_proxy,https_proxy,HTTP_PROXY,HTTPS_PROXY,CI_HTTP_PROXY,CI_HTTPS_PROXY,CI_DOWNLOAD_MAX_ATTEMPTS,CI_DOWNLOAD_DEADLINE_SECONDS \
             env OUTPUT_DIR="$OUTPUT_DIR_GRUB" bash scripts/ci/build-grub-image.sh
 
       - name: Write combined checksums

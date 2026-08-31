@@ -76,15 +76,18 @@ ci_require_cmd chroot
 ci_require_cmd dpkg-deb
 ci_require_cmd depmod
 ci_require_cmd rsync
+ci_require_cmd python3
+ci_require_cmd chown
 
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
 
 OUTPUT_DIR=${OUTPUT_DIR:-out/ci-rootfs}
+ci_validate_output_dir "$OUTPUT_DIR"
 OUTPUT_PREFIX=${OUTPUT_PREFIX:-y700-archlinuxarm}
 ci_validate_output_prefix "$OUTPUT_PREFIX"
-ARCH_ROOTFS_URL=${ARCH_ROOTFS_URL:-https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz}
-ARCH_ROOTFS_SHA256=${ARCH_ROOTFS_SHA256:-}
-ARCH_MIRROR=${ARCH_MIRROR:-'http://os.archlinuxarm.org/$arch/$repo'}
+ARCH_ROOTFS_URL=${ARCH_ROOTFS_URL:-https://ca.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz}
+ARCH_ROOTFS_SHA256=${ARCH_ROOTFS_SHA256:-42a4eeaa038994ffd31fa173256ef2f0ef511358eeb41b9ea1f8626391b9b319}
+ARCH_MIRROR=${ARCH_MIRROR:-'https://ca.us.mirror.archlinuxarm.org/$arch/$repo'}
 ROOTFS_IMAGE_SIZE=${ROOTFS_IMAGE_SIZE:-20G}
 ROOTFS_LABEL=${ROOTFS_LABEL:-ArchLinux}
 ROOTFS_PARTLABEL=${ROOTFS_PARTLABEL:-userdata}
@@ -121,6 +124,7 @@ BUILD_TB321FU_GPU_SENSOR=${BUILD_TB321FU_GPU_SENSOR:-1}
 TB321FU_GPU_SENSOR_SOURCE_ARCHIVE=${TB321FU_GPU_SENSOR_SOURCE_ARCHIVE:-}
 TB321FU_GPU_SENSOR_SOURCE_ARCHIVE_SHA256=${TB321FU_GPU_SENSOR_SOURCE_ARCHIVE_SHA256:-}
 TB321FU_GPU_SENSOR_SOURCE_DIR=${TB321FU_GPU_SENSOR_SOURCE_DIR:-}
+TB321FU_GPU_SENSOR_BUILD_JOBS=${TB321FU_GPU_SENSOR_BUILD_JOBS:-2}
 OVERLAY_ARCHIVE=${OVERLAY_ARCHIVE:-}
 OVERLAY_ARCHIVE_SHA256=${OVERLAY_ARCHIVE_SHA256:-}
 SOURCE_DATE_EPOCH=$(ci_source_date_epoch)
@@ -133,6 +137,87 @@ COMPRESS=${COMPRESS:-7z}
 CHUNK_SIZE=${CHUNK_SIZE:-}
 KEEP_RAW_IMAGE=${KEEP_RAW_IMAGE:-0}
 
+ci_configure_proxy_environment
+
+# The tested Ubuntu release carries these exact Debian package identities.  A
+# filename alone is not trusted: verify-imported-deb.py holds one O_NOFOLLOW
+# fd across the byte/control/tree checks, extraction and extracted-stage check.
+imported_deb_package_name() {
+  local deb=$1 package basename
+  basename=$(basename -- "$deb")
+  case "$basename" in
+    y700-daily-kernel-modules_*.deb) package=y700-daily-kernel-modules ;;
+    y700-daily-rootfs-overlay_*.deb) package=y700-daily-rootfs-overlay ;;
+    qcom-sns-hexagonrpc_*.deb) package=qcom-sns-hexagonrpc ;;
+    qcom-sns-iio-sensor-proxy_*.deb) package=qcom-sns-iio-sensor-proxy ;;
+    qcom-sns-libssc_*.deb) package=qcom-sns-libssc ;;
+    tb321fu-sensors_*.deb) package=tb321fu-sensors ;;
+    tb321fu-haptics_*.deb) package=tb321fu-haptics ;;
+    *) ci_die "unrecognized imported DEB filename: $basename" ;;
+  esac
+  printf '%s\n' "$package"
+}
+
+verify_and_extract_imported_deb() {
+  local deb=$1 stage=$2 package digest
+  package=$(imported_deb_package_name "$deb")
+  digest=$(python3 "$SCRIPT_DIR/verify-imported-deb.py" \
+    --package "$package" --extract "$stage" --print-sha256 "$deb") ||
+    ci_die "imported DEB verification/extraction failed: $(basename -- "$deb")"
+  [[ $digest =~ ^[0-9a-f]{64}$ ]] ||
+    ci_die "imported DEB verifier returned an invalid digest: $(basename -- "$deb")"
+  printf '%s\n' "$digest"
+}
+
+ci_validate_download_source ARCH_ROOTFS_URL "$ARCH_ROOTFS_URL" "$ARCH_ROOTFS_SHA256"
+ci_validate_arch_mirror "$ARCH_MIRROR"
+ci_validate_rootfs_image_size "$ROOTFS_IMAGE_SIZE"
+ci_validate_ext4_label ROOTFS_LABEL "$ROOTFS_LABEL"
+ci_validate_partlabel "$ROOTFS_PARTLABEL"
+ci_validate_hostname "$HOSTNAME_NAME"
+ci_validate_account_name "$DEFAULT_USER_NAME"
+ci_validate_timezone "$TZ_REGION"
+ci_validate_locale_name LANG_NAME "$LANG_NAME"
+ci_validate_locales "$LOCALES"
+ci_validate_session_name "$SDDM_AUTOLOGIN_SESSION"
+ci_validate_bool_value SDDM_AUTOLOGIN "$SDDM_AUTOLOGIN"
+ci_validate_bool_value INSTALL_FCITX5_CHINESE "$INSTALL_FCITX5_CHINESE"
+ci_validate_bool_value INSTALL_FIREFOX "$INSTALL_FIREFOX"
+ci_validate_bool_value INSTALL_CAMERA_APPS "$INSTALL_CAMERA_APPS"
+ci_validate_bool_value BUILD_TB321FU_GPU_SENSOR "$BUILD_TB321FU_GPU_SENSOR"
+ci_validate_bool_value APPLY_Y700_FIRMWARE_FIXES "$APPLY_Y700_FIRMWARE_FIXES"
+ci_validate_bool_value APPLY_Y700_AUDIO_POLICY_FIXES "$APPLY_Y700_AUDIO_POLICY_FIXES"
+ci_validate_bool_value KEEP_RAW_IMAGE "$KEEP_RAW_IMAGE"
+TB321FU_GPU_SENSOR_BUILD_JOBS=$(ci_normalize_decimal_int \
+  TB321FU_GPU_SENSOR_BUILD_JOBS "$TB321FU_GPU_SENSOR_BUILD_JOBS")
+(( TB321FU_GPU_SENSOR_BUILD_JOBS >= 1 && TB321FU_GPU_SENSOR_BUILD_JOBS <= 64 )) ||
+  ci_die "TB321FU_GPU_SENSOR_BUILD_JOBS must be between 1 and 64"
+case "$ROOT_PASSWORD_MODE" in locked|set|empty) ;; *) ci_die "unsupported ROOT_PASSWORD_MODE=$ROOT_PASSWORD_MODE" ;; esac
+case "$USER_SUDO_MODE" in password|nopasswd|none) ;; *) ci_die "unsupported USER_SUDO_MODE=$USER_SUDO_MODE" ;; esac
+case "$DESKTOP_PROFILE" in minimal|standard|full) ;; *) ci_die "unsupported DESKTOP_PROFILE=$DESKTOP_PROFILE" ;; esac
+case "$COMPRESS" in none|zstd|xz|7z) ;; *) ci_die "unsupported COMPRESS=$COMPRESS" ;; esac
+[[ "$KERNEL_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || ci_die "unsafe KERNEL_VERSION=$KERNEL_VERSION"
+if [ -n "$CHUNK_SIZE" ]; then
+  [[ "$CHUNK_SIZE" =~ ^[1-9][0-9]{0,8}([KMG])?$ ]] || ci_die "invalid CHUNK_SIZE=$CHUNK_SIZE"
+fi
+for source_spec in \
+  "DEVICE_DEB_ARCHIVE:$DEVICE_DEB_ARCHIVE:$DEVICE_DEB_ARCHIVE_SHA256" \
+  "SENSOR_DEB_ARCHIVE:$SENSOR_DEB_ARCHIVE:$SENSOR_DEB_ARCHIVE_SHA256" \
+  "HAPTICS_DEB_ARCHIVE:$HAPTICS_DEB_ARCHIVE:$HAPTICS_DEB_ARCHIVE_SHA256" \
+  "CAMERA_STACK_ARCHIVE:$CAMERA_STACK_ARCHIVE:$CAMERA_STACK_ARCHIVE_SHA256" \
+  "TB321FU_GPU_SENSOR_SOURCE_ARCHIVE:$TB321FU_GPU_SENSOR_SOURCE_ARCHIVE:$TB321FU_GPU_SENSOR_SOURCE_ARCHIVE_SHA256" \
+  "OVERLAY_ARCHIVE:$OVERLAY_ARCHIVE:$OVERLAY_ARCHIVE_SHA256"; do
+  source_label=${source_spec%%:*}
+  source_rest=${source_spec#*:}
+  source_value=${source_rest%:*}
+  source_digest=${source_rest##*:}
+  ci_validate_download_source "$source_label" "$source_value" "$source_digest"
+done
+for local_dir in DEVICE_DEB_DIR SENSOR_DEB_DIR HAPTICS_DEB_DIR CAMERA_STACK_DIR TB321FU_GPU_SENSOR_SOURCE_DIR OVERLAY_DIR; do
+  local_value=${!local_dir}
+  [[ "$local_value" != *$'\n'* && "$local_value" != *$'\r'* ]] || ci_die "$local_dir contains control characters"
+done
+
 mkdir -p "$OUTPUT_DIR"
 work_dir=$(mktemp -d "$OUTPUT_DIR/.arch-rootfs-build.XXXXXX")
 rootfs_dir="$work_dir/rootfs"
@@ -142,11 +227,16 @@ arch_camera_supplement_stage="$work_dir/arch-camera-supplement-stage"
 rootfs_img="$OUTPUT_DIR/${OUTPUT_PREFIX}-rootfs.img"
 build_info="$OUTPUT_DIR/${OUTPUT_PREFIX}-rootfs.BUILD-INFO.txt"
 manifest="$OUTPUT_DIR/${OUTPUT_PREFIX}-rootfs.manifest"
+resolv_state="$work_dir/resolv.conf.state"
+resolv_saved=0
 mounted_rootfs=0
 bind_mounts=()
 
 cleanup() {
   set +e
+  if [ "$resolv_saved" = 1 ] && [ -d "$rootfs_dir/etc" ]; then
+    restore_rootfs_resolver
+  fi
   if [ "$mounted_rootfs" = 1 ]; then
     ci_unmount_tree "$rootfs_dir" ||
       ci_log "cleanup preserved mounted work tree for manual recovery: $work_dir"
@@ -156,6 +246,63 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+save_rootfs_resolver() {
+  local path="$rootfs_dir/etc/resolv.conf"
+
+  rm -f -- "$resolv_state" "$resolv_state.file"
+  if [ -L "$path" ]; then
+    printf 'symlink\n%s\n' "$(readlink -- "$path")" > "$resolv_state"
+  elif [ -f "$path" ]; then
+    printf 'file\n' > "$resolv_state"
+    cp -a -- "$path" "$resolv_state.file"
+  elif [ -e "$path" ]; then
+    ci_die "rootfs /etc/resolv.conf is an unsupported special file"
+  else
+    printf 'missing\n' > "$resolv_state"
+  fi
+  resolv_saved=1
+}
+
+restore_rootfs_resolver() {
+  local path="$rootfs_dir/etc/resolv.conf" kind target
+
+  [ "$resolv_saved" = 1 ] || return 0
+  [ -f "$resolv_state" ] || ci_die "resolver state file is missing"
+  kind=$(sed -n '1p' "$resolv_state")
+  rm -f -- "$path"
+  case "$kind" in
+    symlink)
+      target=$(sed -n '2p' "$resolv_state")
+      [ -n "$target" ] || ci_die "saved resolver symlink target is empty"
+      ln -s -- "$target" "$path"
+      ;;
+    file)
+      [ -f "$resolv_state.file" ] || ci_die "saved resolver file is missing"
+      cp -a -- "$resolv_state.file" "$path"
+      ;;
+    missing) ;;
+    *) ci_die "saved resolver state is invalid: $kind" ;;
+  esac
+  resolv_saved=0
+}
+
+prepare_rootfs_resolver() {
+  local path="$rootfs_dir/etc/resolv.conf"
+
+  save_rootfs_resolver
+  rm -f -- "$path"
+  cp -L -- /etc/resolv.conf "$path"
+  if ! awk '
+    /^[[:space:]]*nameserver[[:space:]]+/ {
+      ns=$2
+      if (ns !~ /^(127\.|::1$|0\.0\.0\.0$)/) good=1
+    }
+    END { exit good ? 0 : 1 }
+  ' "$path"; then
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$path"
+  fi
+}
 
 mount_bind() {
   local source=$1
@@ -271,10 +418,8 @@ arch_chroot() {
   chroot "$rootfs_dir" /usr/bin/env -i \
     HOME=/root \
     TERM=xterm \
-    http_proxy="${http_proxy:-}" \
-    https_proxy="${https_proxy:-}" \
-    HTTP_PROXY="${HTTP_PROXY:-}" \
-    HTTPS_PROXY="${HTTPS_PROXY:-}" \
+    http_proxy="${CI_HTTP_PROXY:-}" \
+    https_proxy="${CI_HTTPS_PROXY:-}" \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/bin \
     "$@"
 }
@@ -431,8 +576,8 @@ verify_required_y700_payload() {
   if ci_bool "$BUILD_TB321FU_GPU_SENSOR"; then
     required+=(usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_tb321fu_gpu.so)
     required+=(usr/share/tb321fu-ksystemstats-gpu/ksystemstats_plugin_tb321fu_gpu.so.sha256)
-    required+=(usr/lib/tb321fu/disable-stock-ksystemstats-gpu)
-    required+=(usr/share/libalpm/hooks/99-tb321fu-disable-stock-ksystemstats-gpu.hook)
+    required+=(usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so)
+    required+=(etc/systemd/user/plasma-ksystemstats.service.d/90-tb321fu-gpu-provider.conf)
   fi
 
   local rel
@@ -717,6 +862,8 @@ sanitize_arch_import_stage() {
     find "$stage/usr/lib/modules" -mindepth 2 -maxdepth 2 -type l \
       \( -name build -o -name source \) -delete
   fi
+  ci_normalize_system_payload_ownership "$stage"
+  ci_assert_system_payload_root_owned "$stage"
   ci_normalize_system_payload_modes "$stage"
   ci_assert_normalized_system_payload_modes "$stage"
 }
@@ -735,10 +882,304 @@ discard_arch_import_source_stage() {
   rm -rf --one-file-system -- "$stage_real"
 }
 
+write_arch_import_payload_metadata() {
+  local stage=$1 source_metadata=$2 payload_manifest=$3
+  local metadata_dir="$stage/usr/share/tb321fu"
+  local manifest_path="$metadata_dir/imported-release-payload.sha256"
+  local source_path="$metadata_dir/imported-release-sources.tsv"
+  local manifest_relative=./usr/share/tb321fu/imported-release-payload.sha256
+
+  [ -d "$stage" ] && [ ! -L "$stage" ] ||
+    ci_die "Arch import stage is not a real directory: $stage"
+  [ -f "$source_metadata" ] && [ ! -L "$source_metadata" ] ||
+    ci_die "Arch import source provenance is missing or unsafe: $source_metadata"
+  [ ! -L "$metadata_dir" ] ||
+    ci_die "Arch import metadata directory must not be a symlink"
+  [ ! -L "$manifest_path" ] && [ ! -L "$source_path" ] ||
+    ci_die "Arch import metadata path must not be a symlink"
+  [ ! -e "$manifest_path" ] || [ -f "$manifest_path" ] ||
+    ci_die "Arch import payload manifest path is not a regular file"
+  [ ! -e "$source_path" ] || [ -f "$source_path" ] ||
+    ci_die "Arch import source provenance path is not a regular file"
+
+  # Install provenance before calculating the manifest.  The manifest itself
+  # is removed first and excluded from the file list to avoid recursive
+  # self-reference while still covering every other final regular payload.
+  install -d -m 0755 "$metadata_dir"
+  rm -f -- "$manifest_path"
+  install -m 0644 "$source_metadata" "$source_path"
+  rm -f -- "$payload_manifest"
+  (
+    cd "$stage"
+    LC_ALL=C find . -xdev -type f ! -path "$manifest_relative" -print0 |
+      LC_ALL=C sort -z | xargs -0 -r sha256sum
+  ) > "$payload_manifest"
+  install -m 0644 "$payload_manifest" "$manifest_path"
+  [ -f "$manifest_path" ] && [ ! -L "$manifest_path" ] ||
+    ci_die "failed to install final Arch import payload manifest"
+  [ -f "$source_path" ] && [ ! -L "$source_path" ] ||
+    ci_die "failed to install final Arch import source provenance"
+}
+
+write_arch_package_tree_identity() {
+  local stage=$1
+
+  [ -d "$stage" ] && [ ! -L "$stage" ] ||
+    ci_die "Arch package identity root is not a real directory: $stage"
+  # Directory inode sizes depend on filesystem allocation and insertion
+  # history. Keep real sizes for regular files and symlinks, but use a fixed
+  # zero field for directories and other non-payload file types.
+  if ! (
+    cd "$stage"
+    LC_ALL=C find . -xdev \
+      \( -type f -o -type l \) \
+      -printf '%y\t%U\t%G\t%m\t%s\t%p\t%l\0' -o \
+      -printf '%y\t%U\t%G\t%m\t0\t%p\t%l\0' |
+      LC_ALL=C sort -z
+  ); then
+    ci_die "cannot enumerate canonical Arch package metadata: $stage"
+  fi
+  if ! (
+    cd "$stage"
+    LC_ALL=C find . -xdev -type f -print0 |
+      LC_ALL=C sort -z |
+      xargs -0 -r sha256sum
+  ); then
+    ci_die "cannot fingerprint canonical Arch package files: $stage"
+  fi
+}
+
+compute_arch_import_package_hash() {
+  local stage=$1 manifest_path=$2 source_path=$3
+  local manifest_digest source_digest package_hash
+
+  [ -d "$stage" ] && [ ! -L "$stage" ] || ci_die "Arch import stage is unavailable"
+  [ -f "$manifest_path" ] && [ ! -L "$manifest_path" ] ||
+    ci_die "Arch import payload manifest is unavailable"
+  [ -f "$source_path" ] && [ ! -L "$source_path" ] ||
+    ci_die "Arch import source provenance is unavailable"
+  manifest_digest=$(sha256sum -- "$manifest_path" | awk '{print $1}')
+  source_digest=$(sha256sum -- "$source_path" | awk '{print $1}')
+  package_hash=$(
+    {
+    # Include final tree metadata and content hashes.  Hash only relative
+    # paths/digests so the package version does not depend on the temp path.
+      write_arch_package_tree_identity "$stage"
+      printf 'payload-manifest-sha256=%s\n' "$manifest_digest"
+      printf 'source-provenance-sha256=%s\n' "$source_digest"
+    } | sha256sum | awk '{print $1}'
+  ) || ci_die "cannot compute canonical Arch import package identity"
+  printf '%s\n' "$package_hash"
+}
+
+capture_sorted_nul_command() {
+  local result_name=$1 label=$2
+  shift 2
+  local -n result=$result_name
+  local raw sorted status
+
+  [ -d "$work_dir" ] && [ ! -L "$work_dir" ] ||
+    ci_die "checked enumeration workspace is unavailable: $work_dir"
+  raw=$(mktemp "$work_dir/.nul-list.raw.XXXXXX") ||
+    ci_die "cannot create raw enumeration list for $label"
+  sorted=$(mktemp "$work_dir/.nul-list.sorted.XXXXXX") || {
+    rm -f -- "$raw"
+    ci_die "cannot create sorted enumeration list for $label"
+  }
+  if "$@" > "$raw"; then
+    :
+  else
+    status=$?
+    rm -f -- "$raw" "$sorted"
+    ci_die "$label producer failed with exit status $status"
+  fi
+  if LC_ALL=C sort -z -- "$raw" > "$sorted"; then
+    :
+  else
+    status=$?
+    rm -f -- "$raw" "$sorted"
+    ci_die "$label sort failed with exit status $status"
+  fi
+  rm -f -- "$raw"
+  result=$sorted
+}
+
+arch_import_iio_sensor_proxy_relation_lines() {
+  local stage=$1 source_metadata=$2 relative line
+  local source_count=0 path_count=0
+  local expected_source='deb:qcom-sns-iio-sensor-proxy_20260627.1_arm64.deb:b010a9a783629c4e0fd4c404b1a34e14258fab8a674d0499d553d361cb59a843'
+  local -a transfer_paths=(
+    usr/bin/monitor-sensor
+    usr/libexec/iio-sensor-proxy
+    usr/lib/systemd/system/iio-sensor-proxy.service
+    usr/lib/udev/rules.d/80-iio-sensor-proxy.rules
+    usr/share/dbus-1/system-services/net.hadess.SensorProxy.service
+    usr/share/dbus-1/system.d/net.hadess.SensorProxy.conf
+    usr/share/polkit-1/actions/net.hadess.SensorProxy.policy
+  )
+
+  [ -d "$stage" ] && [ ! -L "$stage" ] ||
+    ci_die "Arch import relation stage is not a real directory: $stage"
+  [ -f "$source_metadata" ] && [ ! -L "$source_metadata" ] ||
+    ci_die "Arch import relation provenance is missing or unsafe: $source_metadata"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "$expected_source" ] && source_count=$((source_count + 1))
+  done < "$source_metadata"
+  for relative in "${transfer_paths[@]}"; do
+    if [ -e "$stage/$relative" ] || [ -L "$stage/$relative" ]; then
+      [ -f "$stage/$relative" ] && [ ! -L "$stage/$relative" ] ||
+        ci_die "iio-sensor-proxy transfer path is not a regular file: /$relative"
+      path_count=$((path_count + 1))
+    fi
+  done
+
+  case "$source_count:$path_count" in
+    0:0)
+      printf '%s\n' 'provides=()' 'conflicts=()' 'replaces=()'
+      ;;
+    1:7)
+      printf '%s\n' \
+        "provides=('iio-sensor-proxy')" \
+        "conflicts=('iio-sensor-proxy')" \
+        "replaces=('iio-sensor-proxy')"
+      ;;
+    *)
+      ci_die "incomplete iio-sensor-proxy ownership-transfer closure (sources=$source_count paths=$path_count)"
+      ;;
+  esac
+}
+
+arch_import_multilib_member_allowed() {
+  local relative=$1
+  case "$relative" in
+    usr/lib/aarch64-linux-gnu|usr/lib/aarch64-linux-gnu/pkgconfig)
+      return 0
+      ;;
+    usr/lib/aarch64-linux-gnu/libaperture-0.so|\
+    usr/lib/aarch64-linux-gnu/libaperture-0.so.0|\
+    usr/lib/aarch64-linux-gnu/libhexagonrpc.so|\
+    usr/lib/aarch64-linux-gnu/libhexagonrpc.so.0.4|\
+    usr/lib/aarch64-linux-gnu/libssc.so|\
+    usr/lib/aarch64-linux-gnu/libssc.so.2|\
+    usr/lib/aarch64-linux-gnu/pkgconfig/libssc.pc)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+arch_import_source_package() {
+  local source_id=$1 filename
+  case "$source_id" in
+    deb:*)
+      filename=${source_id#deb:}
+      filename=${filename%%:*}
+      case "$filename" in
+        qcom-sns-iio-sensor-proxy_*.deb)
+          printf '%s\n' qcom-sns-iio-sensor-proxy
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+arch_import_allowed_pacman_owner() {
+  local relative=$1 source_id=${2:-} source_package
+  source_package=$(arch_import_source_package "$source_id") || return 1
+  [ "$source_package" = qcom-sns-iio-sensor-proxy ] || return 1
+  case "$relative" in
+    usr/bin/monitor-sensor|\
+    usr/libexec/iio-sensor-proxy|\
+    usr/lib/systemd/system/iio-sensor-proxy.service|\
+    usr/lib/udev/rules.d/80-iio-sensor-proxy.rules|\
+    usr/share/dbus-1/system-services/net.hadess.SensorProxy.service|\
+    usr/share/dbus-1/system.d/net.hadess.SensorProxy.conf|\
+    usr/share/polkit-1/actions/net.hadess.SensorProxy.policy)
+      printf '%s\n' iio-sensor-proxy
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_arch_import_relative_path() {
+  local relative=$1 path=$2 source_id=${3:-} existing
+  existing="$rootfs_dir/$relative"
+
+  # Arch ARM uses usrmerge: /lib is a symlink into /usr/lib.  A Debian
+  # payload must never create or replace that link, even when dpkg-deb has
+  # materialized a top-level lib directory in its temporary extraction tree.
+  if [ -L "$rootfs_dir/lib" ]; then
+    case "$relative" in
+      lib|lib/*)
+        ci_die "Arch DEB payload attempts to populate usrmerge /lib: $relative"
+        ;;
+    esac
+  fi
+
+  case "$relative" in
+    usr/lib/aarch64-linux-gnu|usr/lib/aarch64-linux-gnu/*)
+      arch_import_multilib_member_allowed "$relative" ||
+        ci_die "unallowlisted Arch multiarch payload member: $relative"
+      ;;
+  esac
+
+  # A path-level pacman query cannot make an unowned symlink safe to replace:
+  # a later package extraction could follow that link and redirect writes.
+  # Reject links and file/directory type changes before consulting ownership;
+  # the only allowed replacement below is a regular-file-for-regular-file SNS
+  # transfer with an exact stock owner.
+  if [ -L "$existing" ]; then
+    ci_die "imported payload cannot replace an existing rootfs symlink: /$relative"
+  fi
+  if [ -e "$existing" ]; then
+    if [ -L "$path" ]; then
+      ci_die "imported payload changes an existing non-symlink path to a symlink: /$relative"
+    fi
+    if [ -f "$path" ] && [ ! -d "$path" ] && [ ! -f "$existing" ]; then
+      ci_die "imported payload changes an existing directory/special path to a file: /$relative"
+    fi
+    if [ -d "$path" ] && [ ! -L "$path" ] && [ ! -d "$existing" ]; then
+      ci_die "imported payload changes an existing file/special path to a directory: /$relative"
+    fi
+  fi
+
+  # Do not let an imported tree replace a pacman-owned file behind the
+  # package manager's back.  The small exception is the documented SNS
+  # replacement of Arch's stock iio-sensor-proxy files; its owner is checked
+  # exactly and all other collisions fail closed.
+  if { [ -e "$rootfs_dir/$relative" ] || [ -L "$rootfs_dir/$relative" ]; } &&
+     { [ ! -d "$path" ] || [ -L "$path" ]; }; then
+    local owner expected_owner owner_status
+    owner=''
+    if owner=$(arch_chroot /usr/bin/pacman -Qoq "/$relative" 2>/dev/null); then
+      expected_owner=$(arch_import_allowed_pacman_owner "$relative" "$source_id" || true)
+      [ -n "$expected_owner" ] && [ "$owner" = "$expected_owner" ] ||
+        ci_die "imported payload collides with pacman-owned path: /$relative (owner=$owner)"
+      # Replacement entries are intentionally regular files in the tested
+      # SNS package.  Never let the exception turn a symlink into a file.
+      [ -f "$path" ] && [ ! -L "$path" ] &&
+        [ -f "$rootfs_dir/$relative" ] && [ ! -L "$rootfs_dir/$relative" ] ||
+        ci_die "pacman collision has an unsafe member type: /$relative"
+    else
+      owner_status=$?
+      # pacman -Qoq returns status 1 for an unowned path.  Any other status
+      # means the ownership query itself failed and must not be ignored.
+      [ "$owner_status" -eq 1 ] ||
+        ci_die "failed to query pacman ownership for /$relative"
+    fi
+  fi
+}
+
 merge_stage_to_arch_import() {
   local stage=$1
   local source_id=$2
-  local special unreadable path relative target source_meta target_meta
+  local special unreadable path relative target source_meta target_meta member_list
 
   [[ $source_id =~ ^[A-Za-z0-9._:+-]+$ ]] || ci_die "unsafe Arch import source id: $source_id"
   stage_arch_camera_supplement "$stage"
@@ -752,8 +1193,11 @@ merge_stage_to_arch_import() {
   [ -z "$unreadable" ] || ci_die "Arch import directory is not traversable by the package builder: $unreadable"
 
   install -d -m 0755 "$arch_import_stage"
+  capture_sorted_nul_command member_list "Arch import member enumeration" \
+    find "$stage" -mindepth 1 -print0
   while IFS= read -r -d '' path; do
     relative=${path#"$stage"/}
+    validate_arch_import_relative_path "$relative" "$path" "$source_id"
     target="$arch_import_stage/$relative"
     if [ -e "$target" ] || [ -L "$target" ]; then
       if [ -L "$path" ] && [ -L "$target" ]; then
@@ -774,7 +1218,8 @@ merge_stage_to_arch_import() {
         ci_die "conflicting Arch import member type: $relative"
       fi
     fi
-  done < <(find "$stage" -mindepth 1 -print0 | sort -z)
+  done < "$member_list"
+  rm -f -- "$member_list"
 
   rsync -aH --numeric-ids "$stage"/ "$arch_import_stage"/
   if [ ! -f "$arch_import_sources" ]; then
@@ -793,32 +1238,36 @@ install_arch_import_package() {
   local host_build_bind="$rootfs_dir$build_dir"
   local host_bind_path="$rootfs_dir$bind_path"
   local payload_manifest="$work_dir/arch-import-payload.sha256"
-  local target
+  local manifest_path="$arch_import_stage/usr/share/tb321fu/imported-release-payload.sha256"
+  local source_path="$arch_import_stage/usr/share/tb321fu/imported-release-sources.tsv"
+  local target stage_entry unreadable built_package_list iio_relation_lines
   local -a built_packages=() remaining_binds=()
 
   [ -d "$arch_import_stage" ] || return 0
-  [ -n "$(find "$arch_import_stage" -mindepth 1 -print -quit)" ] || return 0
+  stage_entry=$(find "$arch_import_stage" -mindepth 1 -print -quit) ||
+    ci_die "cannot inspect final Arch import stage"
+  [ -n "$stage_entry" ] || return 0
+
+  iio_relation_lines=$(arch_import_iio_sensor_proxy_relation_lines \
+    "$arch_import_stage" "$arch_import_sources")
 
   if [ -d "$arch_import_stage/usr/lib/modules/$KERNEL_VERSION" ]; then
     depmod -b "$arch_import_stage" "$KERNEL_VERSION"
   fi
 
-  (cd "$arch_import_stage" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$payload_manifest"
-  package_hash=$(
-    {
-      (cd "$arch_import_stage" && find . -xdev -printf '%y\t%U\t%G\t%m\t%s\t%p\t%l\0' | sort -z)
-      sha256sum "$payload_manifest" "$arch_import_sources"
-    } | sha256sum | awk '{print $1}'
-  )
+  write_arch_import_payload_metadata \
+    "$arch_import_stage" "$arch_import_sources" "$payload_manifest"
+  package_hash=$(compute_arch_import_package_hash \
+    "$arch_import_stage" "$manifest_path" "$source_path")
   package_version="1.${package_hash:0:16}"
-  install -D -m 0644 "$payload_manifest" \
-    "$arch_import_stage/usr/share/tb321fu/imported-release-payload.sha256"
-  install -D -m 0644 "$arch_import_sources" \
-    "$arch_import_stage/usr/share/tb321fu/imported-release-sources.tsv"
 
-  [ -z "$(find "$arch_import_stage" -type f ! -perm -0004 -print -quit)" ] || \
+  unreadable=$(find "$arch_import_stage" -type f ! -perm -0004 -print -quit) ||
+    ci_die "cannot inspect final Arch import file readability"
+  [ -z "$unreadable" ] || \
     ci_die "final Arch import is not readable by the package builder"
-  [ -z "$(find "$arch_import_stage" -type d ! -perm -0001 -print -quit)" ] || \
+  unreadable=$(find "$arch_import_stage" -type d ! -perm -0001 -print -quit) ||
+    ci_die "cannot inspect final Arch import directory traversal"
+  [ -z "$unreadable" ] || \
     ci_die "final Arch import directory is not traversable by the package builder"
   if arch_chroot /usr/bin/id -u "$build_user" >/dev/null 2>&1; then
     ci_die "reserved Arch package-build account already exists: $build_user"
@@ -840,6 +1289,7 @@ arch=('aarch64')
 url='https://github.com/GUF296/tb321fu-linux'
 license=('custom')
 options=('!strip' 'docs' 'libtool' 'emptydirs' '!zipman' '!purge' '!debug' '!lto')
+$iio_relation_lines
 source=()
 
 package() {
@@ -857,9 +1307,12 @@ PKGBUILD
     SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}" \
     /usr/bin/makepkg --noconfirm --nodeps --cleanbuild --clean --force
 
+  capture_sorted_nul_command built_package_list "native Arch import package enumeration" \
+    find "$host_build_dir" -maxdepth 1 -type f -name "$package_name-*.pkg.tar.*" -print0
   while IFS= read -r -d '' package_file; do
     built_packages+=("$package_file")
-  done < <(find "$host_build_dir" -maxdepth 1 -type f -name "$package_name-*.pkg.tar.*" -print0 | sort -z)
+  done < "$built_package_list"
+  rm -f -- "$built_package_list"
   [ "${#built_packages[@]}" -eq 1 ] || \
     ci_die "expected one native Arch import package, found ${#built_packages[@]}"
   package_file=${built_packages[0]}
@@ -870,6 +1323,25 @@ PKGBUILD
     ci_die "native Arch import package identity mismatch"
   arch_chroot /usr/bin/pacman -Qkk "$package_name" >/dev/null || \
     ci_die "native Arch import package failed its immediate file check"
+  # Confirm that pacman completed the documented ownership transfer instead
+  # of merely unpacking files over the stock IIO package.  This is deliberately
+  # a transaction-level check: path checks before -U alone cannot prove the
+  # installed package database is coherent.
+  local collision_relative collision_owner
+  for collision_relative in \
+    usr/bin/monitor-sensor \
+    usr/libexec/iio-sensor-proxy \
+    usr/lib/systemd/system/iio-sensor-proxy.service \
+    usr/lib/udev/rules.d/80-iio-sensor-proxy.rules \
+    usr/share/dbus-1/system-services/net.hadess.SensorProxy.service \
+    usr/share/dbus-1/system.d/net.hadess.SensorProxy.conf \
+    usr/share/polkit-1/actions/net.hadess.SensorProxy.policy; do
+    [ -e "$arch_import_stage/$collision_relative" ] || [ -L "$arch_import_stage/$collision_relative" ] || continue
+    collision_owner=$(arch_chroot /usr/bin/pacman -Qoq "/$collision_relative") ||
+      ci_die "pacman did not record ownership for imported collision path: /$collision_relative"
+    [ "$collision_owner" = "$package_name" ] ||
+      ci_die "pacman ownership transfer failed for /$collision_relative (owner=$collision_owner)"
+  done
   printf '%s=%s-1\n' "$package_name" "$package_version" >> \
     "$OUTPUT_DIR/${OUTPUT_PREFIX}-rootfs.packages"
 
@@ -905,7 +1377,7 @@ install_arch_native_stage_package() {
   local host_build_dir="$work_dir/${package_name}-build"
   local host_build_bind="$rootfs_dir$build_dir"
   local host_bind_path="$rootfs_dir$bind_path"
-  local relation target
+  local relation target built_package_list
   local -a built_packages=() remaining_binds=()
   local -n dependencies=$dependencies_name
   local -n provides=$provides_name
@@ -929,12 +1401,13 @@ install_arch_native_stage_package() {
     [ -f "$install_script" ] || ci_die "native Arch install script is missing: $install_script"
   fi
 
+  ci_normalize_system_payload_ownership "$stage"
+  ci_assert_system_payload_root_owned "$stage"
   ci_normalize_system_payload_modes "$stage"
   ci_assert_normalized_system_payload_modes "$stage"
   package_hash=$(
     {
-      (cd "$stage" && find . -xdev -printf '%y\t%U\t%G\t%m\t%s\t%p\t%l\0' | sort -z)
-      (cd "$stage" && find . -xdev -type f -print0 | sort -z | xargs -0 -r sha256sum)
+      write_arch_package_tree_identity "$stage"
       printf '\0name=%s\ndescription=%s\n' "$package_name" "$package_description"
       printf 'depends=%s\n' "${dependencies[*]}"
       printf 'provides=%s\n' "${provides[*]}"
@@ -944,7 +1417,7 @@ install_arch_native_stage_package() {
         sha256sum "$install_script" | awk '{print "install=" $1}'
       fi
     } | sha256sum | awk '{print $1}'
-  )
+  ) || ci_die "cannot compute canonical native Arch package identity: $package_name"
   package_version="1.${package_hash:0:16}"
 
   if arch_chroot /usr/bin/id -u "$build_user" >/dev/null 2>&1; then
@@ -991,9 +1464,12 @@ install_arch_native_stage_package() {
     SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}" \
     /usr/bin/makepkg --noconfirm --nodeps --cleanbuild --clean --force
 
+  capture_sorted_nul_command built_package_list "native Arch package enumeration for $package_name" \
+    find "$host_build_dir" -maxdepth 1 -type f -name "$package_name-*.pkg.tar.*" -print0
   while IFS= read -r -d '' package_file; do
     built_packages+=("$package_file")
-  done < <(find "$host_build_dir" -maxdepth 1 -type f -name "$package_name-*.pkg.tar.*" -print0 | sort -z)
+  done < "$built_package_list"
+  rm -f -- "$built_package_list"
   [ "${#built_packages[@]}" -eq 1 ] || \
     ci_die "expected one native Arch package for $package_name, found ${#built_packages[@]}"
   package_file=${built_packages[0]}
@@ -1053,26 +1529,34 @@ enable_y700_device_services() {
 
 extract_device_payload_dir() {
   local payload_dir=$1
-  local deb overlay stage
+  local deb overlay stage deb_digest deb_list overlay_list unsupported found=0
 
-  if [ -z "$(find "$payload_dir" -type f \( -name '*.deb' -o -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' -o -name '*.tar.zst' \) -print -quit)" ]; then
-    ci_die "device payload directory has no supported payload files: $payload_dir"
-  fi
-
+  capture_sorted_nul_command deb_list "device DEB enumeration" \
+    find "$payload_dir" -type f -name '*.deb' -print0
   while IFS= read -r -d '' deb; do
+    found=1
     ci_log "extracting device deb data: $(basename "$deb")"
     stage="$work_dir/device-stage-$(basename "$deb").d"
     rm -rf "$stage"
     mkdir -p "$stage"
-    dpkg-deb -x "$deb" "$stage"
+    deb_digest=$(verify_and_extract_imported_deb "$deb" "$stage")
     remove_legacy_y700_payload "$stage"
     remove_legacy_camera_payload "$stage"
-    merge_stage_to_arch_import "$stage" "deb:$(basename "$deb"):$(sha256sum "$deb" | awk '{print $1}')"
-  done < <(find "$payload_dir" -type f -name '*.deb' -print0 | sort -z)
+    merge_stage_to_arch_import "$stage" "deb:$(basename "$deb"):$deb_digest"
+  done < "$deb_list"
+  rm -f -- "$deb_list"
 
+  unsupported=$(find "$payload_dir" -type f -name '*.tar.zst' -print -quit)
+  [ -z "$unsupported" ] ||
+    ci_die "unsupported .tar.zst device overlay (no bounded decoder): $unsupported"
+  capture_sorted_nul_command overlay_list "device overlay enumeration" \
+    find "$payload_dir" -type f \
+      \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' \) \
+      -print0
   while IFS= read -r -d '' overlay; do
+    found=1
     case "$overlay" in
-      *.tar|*.tar.gz|*.tgz|*.tar.xz|*.tar.zst)
+      *.tar|*.tar.gz|*.tgz|*.tar.xz)
         ci_log "extracting device overlay: $(basename "$overlay")"
         stage="$work_dir/device-overlay-stage-$(basename "$overlay").d"
         rm -rf "$stage"
@@ -1084,7 +1568,10 @@ extract_device_payload_dir() {
         merge_stage_to_arch_import "$stage" "overlay:$(basename "$overlay"):$(sha256sum "$overlay" | awk '{print $1}')"
         ;;
     esac
-  done < <(find "$payload_dir" -type f \( -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' -o -name '*.tar.zst' \) -print0 | sort -z)
+  done < "$overlay_list"
+  rm -f -- "$overlay_list"
+  [ "$found" = 1 ] ||
+    ci_die "device payload directory has no supported payload files: $payload_dir"
 }
 
 apply_device_payloads() {
@@ -1106,19 +1593,22 @@ apply_device_payloads() {
 extract_tb321fu_deb_payload_dir() {
   local payload_dir=$1
   local label=$2
-  local deb stage found=0
+  local deb stage deb_digest deb_list found=0
 
+  capture_sorted_nul_command deb_list "$label DEB enumeration" \
+    find "$payload_dir" -type f -name '*.deb' -print0
   while IFS= read -r -d '' deb; do
     found=1
     ci_log "extracting $label deb data: $(basename "$deb")"
     stage="$work_dir/${label}-stage-$(basename "$deb").d"
     rm -rf "$stage"
     mkdir -p "$stage"
-    dpkg-deb -x "$deb" "$stage"
+    deb_digest=$(verify_and_extract_imported_deb "$deb" "$stage")
     remove_legacy_y700_payload "$stage"
     remove_legacy_camera_payload "$stage"
-    merge_stage_to_arch_import "$stage" "deb:$(basename "$deb"):$(sha256sum "$deb" | awk '{print $1}')"
-  done < <(find "$payload_dir" -type f -name '*.deb' -print0 | sort -z)
+    merge_stage_to_arch_import "$stage" "deb:$(basename "$deb"):$deb_digest"
+  done < "$deb_list"
+  rm -f -- "$deb_list"
 
   [ "$found" = 1 ] || ci_die "$label payload directory has no .deb files: $payload_dir"
 }
@@ -1151,6 +1641,17 @@ apply_tb321fu_deb_payloads() {
   fi
 }
 
+camera_source_root_is_contained() {
+  local root=$1 candidate=$2 root_real candidate_real
+
+  root_real=$(realpath -e -- "$root") || return 1
+  candidate_real=$(realpath -e -- "$candidate") || return 1
+  case "$candidate_real" in
+    "$root_real"|"$root_real"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 find_camera_source_root() {
   local root=$1 found candidate
   local -a markers=() candidates=()
@@ -1158,11 +1659,19 @@ find_camera_source_root() {
 
   if [ -d "$root/rootfs-overlay/opt/libcamera-y700" ] && \
      [ -f "$root/rootfs-overlay/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" ]; then
+    camera_source_root_is_contained "$root" "$root/rootfs-overlay" || {
+      printf 'camera source root escapes its input directory: %s\n' "$root/rootfs-overlay" >&2
+      return 1
+    }
     printf '%s\n' "$root/rootfs-overlay"
     return 0
   fi
   if [ -d "$root/opt/libcamera-y700" ] && \
      [ -f "$root/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so" ]; then
+    camera_source_root_is_contained "$root" "$root" || {
+      printf 'camera source root escapes its input directory: %s\n' "$root" >&2
+      return 1
+    }
     printf '%s\n' "$root"
     return 0
   fi
@@ -1172,6 +1681,7 @@ find_camera_source_root() {
   for found in "${markers[@]}"; do
     candidate=${found%/usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so}
     [ -d "$candidate/opt/libcamera-y700" ] || continue
+    camera_source_root_is_contained "$root" "$candidate" || continue
     if [ -z "${seen[$candidate]+set}" ]; then
       seen[$candidate]=1
       candidates+=("$candidate")
@@ -1186,6 +1696,196 @@ find_camera_source_root() {
       return 2
       ;;
   esac
+}
+
+validate_camera_stack_symlink() {
+  local stage=$1 relative=$2 path=$3 target target_path stage_real
+
+  target=$(readlink -- "$path") || ci_die "cannot read camera stack symlink: $relative"
+  case "$relative" in
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so)
+      [ "$target" = libcamera-base.so.0.7 ] ||
+        ci_die "camera stack has an unsafe libcamera-base symlink target: $target"
+      ;;
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7)
+      [ "$target" = libcamera-base.so.0.7.1 ] ||
+        ci_die "camera stack has an unsafe libcamera-base SONAME symlink target: $target"
+      ;;
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so)
+      [ "$target" = libcamera.so.0.7 ] ||
+        ci_die "camera stack has an unsafe libcamera symlink target: $target"
+      ;;
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7)
+      [ "$target" = libcamera.so.0.7.1 ] ||
+        ci_die "camera stack has an unsafe libcamera SONAME symlink target: $target"
+      ;;
+    usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so)
+      [ "$target" = /opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so ] ||
+        ci_die "camera stack has an unsafe system GStreamer symlink target: $target"
+      ;;
+    *)
+      ci_die "camera stack has an unapproved symlink: $relative -> $target"
+      ;;
+  esac
+
+  case "$target" in
+    /*) target_path="$stage${target}" ;;
+    *) target_path="$(dirname -- "$path")/$target" ;;
+  esac
+  target_path=$(realpath -e -- "$target_path") ||
+    ci_die "camera stack symlink target does not exist: $relative -> $target"
+  stage_real=$(realpath -e -- "$stage") || ci_die "cannot resolve camera stack stage: $stage"
+  case "$target_path" in
+    "$stage_real"|"$stage_real"/*) ;;
+    *) ci_die "camera stack symlink target escapes stage: $relative -> $target" ;;
+  esac
+  [ -f "$target_path" ] || ci_die "camera stack symlink target is not a regular file: $relative -> $target"
+}
+
+camera_canonical_symlink_target() {
+  local relative=$1
+  case "$relative" in
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so)
+      printf '%s\n' libcamera-base.so.0.7
+      ;;
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7)
+      printf '%s\n' libcamera-base.so.0.7.1
+      ;;
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so)
+      printf '%s\n' libcamera.so.0.7
+      ;;
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7)
+      printf '%s\n' libcamera.so.0.7.1
+      ;;
+    usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so)
+      printf '%s\n' /opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+camera_canonical_expected_mode() {
+  case "$1" in
+    opt/libcamera-y700/bin/cam|\
+    opt/libcamera-y700/bin/libcamera-bug-report|\
+    opt/libcamera-y700/libexec/libcamera/soft_ipa_proxy|\
+    usr/local/bin/y700-camera-cam|\
+    usr/local/bin/y700-camera-env|\
+    usr/local/bin/y700-camera-preview)
+      printf '%s\n' 755
+      ;;
+    *)
+      printf '%s\n' 644
+      ;;
+  esac
+}
+
+camera_contract_add_parent_dirs() {
+  local relative=$1 parent
+  while [[ "$relative" == */* ]]; do
+    parent=${relative%/*}
+    [ -n "$parent" ] || break
+    printf '%s\n' "$parent"
+    relative=$parent
+  done
+}
+
+validate_camera_tree_against_contract() {
+  local tree=$1 sums=$2 label=$3
+  local hash relative extra path actual_kind expected_kind expected_mode actual_mode target
+  local special
+  local -A expected_kind_map=() expected_hash_map=() expected_mode_map=() expected_link_map=() actual_map=()
+  local -a symlink_paths=(
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so
+    opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7
+    usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so
+  )
+
+  [ -d "$tree" ] && [ ! -L "$tree" ] || ci_die "$label camera tree is not a real directory: $tree"
+  [ "$(stat -c '%a' -- "$tree")" = 755 ] ||
+    ci_die "$label camera tree root has non-canonical mode: $tree"
+  [ -f "$sums" ] && [ ! -L "$sums" ] || ci_die "camera canonical checksum file is missing or symlinked: $sums"
+  expected_kind_map[.]=d
+
+  # SHA256SUMS is the reviewed list of every regular camera payload file.  Do
+  # strict parsing here so a malformed or expanded checksum file cannot widen
+  # the accepted namespace.
+  while IFS=' ' read -r hash relative extra || [ -n "$hash$relative$extra" ]; do
+    [ -n "$hash" ] || continue
+    [[ "$hash" =~ ^[A-Fa-f0-9]{64}$ ]] || ci_die "invalid camera checksum record in $sums"
+    [ -n "$relative" ] && [ -z "$extra" ] || ci_die "malformed camera checksum record in $sums"
+    [[ "$relative" != /* && "$relative" != *..* && "$relative" != *$'\\'* && "$relative" != *$'\n'* && "$relative" != *$'\r'* ]] ||
+      ci_die "unsafe camera checksum path: $relative"
+    [ -z "${expected_kind_map[$relative]+x}" ] || ci_die "duplicate camera canonical path: $relative"
+    expected_kind_map[$relative]=f
+    expected_hash_map[$relative]=${hash,,}
+    expected_mode_map[$relative]=$(camera_canonical_expected_mode "$relative")
+    while IFS= read -r path; do
+      expected_kind_map[$path]=d
+    done < <(camera_contract_add_parent_dirs "$relative")
+  done < "$sums"
+
+  for relative in "${symlink_paths[@]}"; do
+    [ -z "${expected_kind_map[$relative]+x}" ] || ci_die "camera symlink collides with regular/dir path: $relative"
+    expected_kind_map[$relative]=l
+    expected_link_map[$relative]=$(camera_canonical_symlink_target "$relative")
+    while IFS= read -r path; do
+      expected_kind_map[$path]=d
+    done < <(camera_contract_add_parent_dirs "$relative")
+  done
+
+  while IFS= read -r -d '' path; do
+    relative=${path#"$tree"/}
+    [ -n "$relative" ] || continue
+    [[ "$relative" != *$'\n'* && "$relative" != *$'\r'* ]] ||
+      ci_die "unsafe camera member name in $label tree"
+    actual_map[$relative]=1
+    expected_kind=${expected_kind_map[$relative]-}
+    [ -n "$expected_kind" ] || ci_die "unapproved camera $label member: $relative"
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      actual_kind=d
+      actual_mode=$(stat -c '%a' -- "$path")
+      [ "$expected_kind" = d ] || ci_die "camera member type mismatch: $relative"
+      [ "$actual_mode" = 755 ] || ci_die "camera directory has non-canonical mode: $relative ($actual_mode)"
+    elif [ -f "$path" ] && [ ! -L "$path" ]; then
+      actual_kind=f
+      [ "$expected_kind" = f ] || ci_die "camera member type mismatch: $relative"
+      actual_mode=$(stat -c '%a' -- "$path")
+      expected_mode=${expected_mode_map[$relative]}
+      [ "$actual_mode" = "$expected_mode" ] || ci_die "camera file has non-canonical mode: $relative ($actual_mode, expected $expected_mode)"
+      [ "$(stat -c '%h' -- "$path")" = 1 ] || ci_die "camera file is hard-linked: $relative"
+      hash=$(sha256sum -- "$path" | awk '{print $1}')
+      [ "$hash" = "${expected_hash_map[$relative]}" ] || ci_die "camera checksum mismatch: $relative"
+    elif [ -L "$path" ]; then
+      actual_kind=l
+      [ "$expected_kind" = l ] || ci_die "camera member type mismatch: $relative"
+      target=$(readlink -- "$path") || ci_die "cannot read camera symlink: $relative"
+      [ "$target" = "${expected_link_map[$relative]}" ] || ci_die "camera symlink target mismatch: $relative"
+      validate_camera_stack_symlink "$tree" "$relative" "$path"
+    else
+      special=$(find -P "$path" -maxdepth 0 -print -quit)
+      ci_die "camera tree contains unsupported special member: ${special:-$relative}"
+    fi
+  done < <(find -P "$tree" -mindepth 1 -print0 | sort -z)
+
+  for relative in "${!expected_kind_map[@]}"; do
+    [ "$relative" = . ] && continue
+    [ -n "${actual_map[$relative]+x}" ] || ci_die "camera $label tree is missing canonical member: $relative"
+  done
+}
+
+validate_camera_stack_stage() {
+  local stage=$1
+  local canonical_root="$REPO_ROOT/source/tb321fu-camera-rootfs-overlay/rootfs-overlay"
+  local canonical_sums="$REPO_ROOT/source/tb321fu-camera-rootfs-overlay/SHA256SUMS"
+
+  # The repository tree is the canonical source, and its checksum file is
+  # committed beside it.  Validate it on every invocation so a dirty checkout
+  # cannot silently redefine what an archive is allowed to contain.
+  validate_camera_tree_against_contract "$canonical_root" "$canonical_sums" repository
+  validate_camera_tree_against_contract "$stage" "$canonical_sums" input
 }
 
 apply_tb321fu_camera_stack() {
@@ -1218,6 +1918,7 @@ apply_tb321fu_camera_stack() {
   rm -rf "$stage"
   mkdir -p "$stage"
   rsync -aH --numeric-ids "$source_root"/ "$stage"/
+  validate_camera_stack_stage "$stage"
   if [ -d "$arch_camera_supplement_stage" ]; then
     local supplement_relative supplement_source supplement_target
     for supplement_relative in \
@@ -1275,23 +1976,99 @@ case "$source_root" in
   ""|/*) ;;
   *) echo "TB321FU_CAMERA_COMPAT_SOURCE_ROOT must be empty or absolute" >&2; exit 2 ;;
 esac
+if [ "$(id -u)" -ne 0 ] && [ -z "$root" ]; then
+  echo "camera compatibility refresh requires root" >&2
+  exit 1
+fi
 multiarch=$root/usr/lib/aarch64-linux-gnu
 source_multiarch=$source_root/usr/lib/aarch64-linux-gnu
+self=$root/usr/lib/tb321fu/refresh-camera-compat-paths
+[ -f "$self" ] && [ ! -L "$self" ] || {
+  echo "camera compatibility helper identity is invalid: $self" >&2
+  exit 1
+  }
+compat_mtime=$(stat -c '%Y' -- "$self") || exit 1
+case "$compat_mtime" in
+  ''|*[!0-9-]*) echo "camera compatibility helper mtime is invalid: $compat_mtime" >&2; exit 1 ;;
+esac
+
+replace_regular() {
+  source=$1
+  destination=$2
+  [ -f "$source" ] && [ ! -L "$source" ] || {
+    echo "camera compatibility source is not a regular file: $source" >&2
+    return 1
+  }
+  [ ! -L "$destination" ] || {
+    echo "refusing to follow camera compatibility symlink: $destination" >&2
+    return 1
+  }
+  if [ -e "$destination" ] && [ ! -f "$destination" ]; then
+    echo "camera compatibility destination is not a regular file: $destination" >&2
+    return 1
+  fi
+  if [ ! -f "$destination" ] || ! cmp -s "$source" "$destination"; then
+    temporary=$destination.new.$$
+    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    if [ "$(id -u)" -eq 0 ]; then
+      install -o 0 -g 0 -m 0644 "$source" "$temporary"
+    else
+      install -m 0644 "$source" "$temporary"
+    fi
+    touch -d "@$compat_mtime" -- "$temporary"
+    mv -f -- "$temporary" "$destination"
+    trap - EXIT HUP INT TERM
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    chown 0:0 -- "$destination"
+  fi
+  chmod 0644 -- "$destination"
+  touch -d "@$compat_mtime" -- "$destination"
+  }
+
+replace_symlink() {
+  target=$1
+  destination=$2
+  if [ -L "$destination" ] && [ "$(readlink -- "$destination")" = "$target" ]; then
+    :
+  else
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] || {
+      [ -f "$destination" ] || {
+        echo "camera compatibility destination is not replaceable: $destination" >&2
+        return 1
+      }
+      rm -f -- "$destination"
+    }
+    temporary=$destination.new.$$
+    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    ln -s -- "$target" "$temporary"
+    if [ "$(id -u)" -eq 0 ]; then
+      chown -h 0:0 -- "$temporary"
+    fi
+    touch -h -d "@$compat_mtime" -- "$temporary"
+    mv -f -- "$temporary" "$destination"
+    trap - EXIT HUP INT TERM
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    chown -h 0:0 -- "$destination"
+  fi
+  touch -h -d "@$compat_mtime" -- "$destination"
+  }
 
 if [ -f "$source_multiarch/libaperture-0.so.0" ]; then
-  ln -sfn /usr/lib/aarch64-linux-gnu/libaperture-0.so.0 "$root/usr/lib/libaperture-0.so.0"
+  replace_symlink /usr/lib/aarch64-linux-gnu/libaperture-0.so.0 "$root/usr/lib/libaperture-0.so.0"
 fi
 if [ -L "$source_multiarch/libaperture-0.so" ]; then
   target=$(readlink "$source_multiarch/libaperture-0.so")
   [ "$target" = libaperture-0.so.0 ] || { echo "unsafe libaperture symlink target: $target" >&2; exit 1; }
-  ln -sfn "$target" "$root/usr/lib/libaperture-0.so"
+  replace_symlink "$target" "$root/usr/lib/libaperture-0.so"
 fi
 
 spa=$multiarch/spa-0.2/libcamera/libspa-libcamera.so
 [ -f "$spa" ] || { echo "missing TB321FU camera SPA source: $spa" >&2; exit 1; }
 install -d -m 0755 "$root/usr/lib/spa-0.2/libcamera" "$root/usr/lib/gstreamer-1.0"
-install -m 0644 "$spa" "$root/usr/lib/spa-0.2/libcamera/libspa-libcamera.so"
-ln -sfn /opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so \
+replace_regular "$spa" "$root/usr/lib/spa-0.2/libcamera/libspa-libcamera.so"
+replace_symlink /opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so \
   "$root/usr/lib/gstreamer-1.0/libgstlibcamera.so"
 CAMERA_COMPAT
   chmod 0755 "$root/usr/lib/tb321fu/refresh-camera-compat-paths"
@@ -1355,8 +2132,8 @@ find_gpu_sensor_source_root() {
 }
 
 apply_tb321fu_gpu_sensor() {
-  local root=$1 source_root archive extract rootfs_src rootfs_build rootfs_stage plugin_rel stock_plugin_rel disabled_stock_plugin_rel
-  local had_stock_plugin=0
+  local root=$1 source_root archive extract rootfs_src rootfs_build rootfs_stage plugin_rel stock_plugin_rel service_dropin
+  local source_manifest copied_manifest
   local -a gpu_dependencies=(glibc gcc-libs ksystemstats libksysguard qt6-base kcoreaddons ki18n lm_sensors)
   local -a gpu_provides=(tb321fu-adreno-frequency-provider)
   local -a gpu_conflicts=(y700-ksystemstats-gpu)
@@ -1375,17 +2152,27 @@ apply_tb321fu_gpu_sensor() {
     source_root=$(find_gpu_sensor_source_root "$REPO_ROOT/source/tb321fu-ksystemstats-adreno-freq") || ci_die "repository GPU sensor source is missing"
   fi
 
+  ci_validate_gpu_sensor_source_input_tree "${extract:-${TB321FU_GPU_SENSOR_SOURCE_DIR:-$REPO_ROOT/source/tb321fu-ksystemstats-adreno-freq}}" "$source_root"
+  ci_validate_gpu_sensor_source_tree "$source_root"
+  source_manifest=$(ci_gpu_sensor_source_manifest "$source_root") ||
+    ci_die "cannot fingerprint GPU sensor source tree"
+
   ci_log "building TB321FU KSystemStats Adreno GPU frequency plugin"
   rootfs_src=/tmp/tb321fu-ksystemstats-adreno-freq-src
   rootfs_build=/tmp/tb321fu-ksystemstats-adreno-freq-build
   rootfs_stage=/tmp/tb321fu-ksystemstats-gpu-package
   plugin_rel=usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_tb321fu_gpu.so
   stock_plugin_rel=usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so
-  disabled_stock_plugin_rel=$stock_plugin_rel.disabled-tb321fu-adreno
+  service_dropin=etc/systemd/user/plasma-ksystemstats.service.d/90-tb321fu-gpu-provider.conf
 
   rm -rf "$root$rootfs_src" "$root$rootfs_build" "$root$rootfs_stage"
   install -d -m 0755 "$root$rootfs_src" "$root$rootfs_stage"
   rsync -a --delete "$source_root"/ "$root$rootfs_src"/
+  ci_validate_gpu_sensor_source_tree "$root$rootfs_src"
+  copied_manifest=$(ci_gpu_sensor_source_manifest "$root$rootfs_src") ||
+    ci_die "cannot fingerprint copied GPU sensor source tree"
+  [ "$copied_manifest" = "$source_manifest" ] ||
+    ci_die "GPU sensor source changed while being staged"
 
   arch_chroot /usr/bin/cmake -S "$rootfs_src" -B "$rootfs_build" \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -1394,25 +2181,16 @@ apply_tb321fu_gpu_sensor() {
   arch_chroot /usr/bin/env DESTDIR="$rootfs_stage" /usr/bin/cmake --install "$rootfs_build"
 
   rm -rf "$root$rootfs_src" "$root$rootfs_build"
-  install -D -m 0755 "$SCRIPT_DIR/payloads/tb321fu-disable-stock-ksystemstats-gpu" \
-    "$root$rootfs_stage/usr/lib/tb321fu/disable-stock-ksystemstats-gpu"
-  install -d -m 0755 "$root$rootfs_stage/usr/share/libalpm/hooks"
-  cat > "$root$rootfs_stage/usr/share/libalpm/hooks/99-tb321fu-disable-stock-ksystemstats-gpu.hook" <<'GPU_HOOK'
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Path
-Target = usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so
-
-[Action]
-Description = Keep the stock KSystemStats GPU provider disabled on TB321FU
-When = PostTransaction
-Exec = /usr/lib/tb321fu/disable-stock-ksystemstats-gpu
-GPU_HOOK
-  chmod 0644 "$root$rootfs_stage/usr/share/libalpm/hooks/99-tb321fu-disable-stock-ksystemstats-gpu.hook"
-  if [ -f "$root/$stock_plugin_rel" ]; then
-    had_stock_plugin=1
-  fi
+  # Keep the stock package's plugin file in place for pacman integrity.  The
+  # ksystemstats user service gets a private namespace in which that one file
+  # is inaccessible, so upgrades never create a permanently missing mtree
+  # member in the stock ksystemstats package.
+  install -d -m 0755 "$root$rootfs_stage/etc/systemd/user/plasma-ksystemstats.service.d"
+  cat > "$root$rootfs_stage/$service_dropin" <<'GPU_DROPIN'
+[Service]
+InaccessiblePaths=-/usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so
+GPU_DROPIN
+  chmod 0644 "$root$rootfs_stage/$service_dropin"
   install -d -m 0755 "$root$rootfs_stage/usr/share/tb321fu-ksystemstats-gpu"
   (
     cd "$root$rootfs_stage"
@@ -1424,16 +2202,13 @@ GPU_HOOK
     tb321fu-ksystemstats-gpu \
     'TB321FU Adreno frequency provider for KSystemStats' \
     "$root$rootfs_stage" \
-    gpu_dependencies gpu_provides gpu_conflicts gpu_replaces \
-    "$SCRIPT_DIR/payloads/tb321fu-ksystemstats-gpu.install"
+    gpu_dependencies gpu_provides gpu_conflicts gpu_replaces
 
   [ -f "$root/$plugin_rel" ] || ci_die "TB321FU GPU sensor plugin missing after build: /$plugin_rel"
-  [ ! -e "$root/$stock_plugin_rel" ] || ci_die "stock KSystemStats GPU plugin still enabled: /$stock_plugin_rel"
-  if [ "$had_stock_plugin" = 1 ]; then
-    [ -f "$root/$disabled_stock_plugin_rel" ] || ci_die "disabled stock KSystemStats GPU plugin missing: /$disabled_stock_plugin_rel"
-  fi
-  [ -x "$root/usr/lib/tb321fu/disable-stock-ksystemstats-gpu" ] || ci_die "GPU stock-plugin disable helper missing"
-  [ -f "$root/usr/share/libalpm/hooks/99-tb321fu-disable-stock-ksystemstats-gpu.hook" ] || ci_die "GPU stock-plugin pacman hook missing"
+  [ -f "$root/$stock_plugin_rel" ] || ci_die "stock KSystemStats GPU plugin is missing: /$stock_plugin_rel"
+  [ -f "$root/$service_dropin" ] || ci_die "KSystemStats GPU service isolation drop-in is missing: /$service_dropin"
+  [ "$(arch_chroot /usr/bin/pacman -Qoq "/$stock_plugin_rel")" = ksystemstats ] || \
+    ci_die "stock KSystemStats GPU plugin is not owned by ksystemstats"
   [ "$(arch_chroot /usr/bin/pacman -Qoq "/$plugin_rel")" = tb321fu-ksystemstats-gpu ] || \
     ci_die "TB321FU GPU plugin is not owned by its native Arch package"
   (
@@ -1443,7 +2218,7 @@ GPU_HOOK
 }
 
 verify_tb321fu_native_package_integrity() {
-  local package path owner
+  local package path owner stock_owner
   local -a packages=(tb321fu-camera-stack)
   local -a camera_paths=(
     /etc/ld.so.conf.d/y700-device.conf
@@ -1459,9 +2234,8 @@ verify_tb321fu_native_package_integrity() {
   )
   local -a gpu_paths=(
     /usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_tb321fu_gpu.so
-    /usr/lib/tb321fu/disable-stock-ksystemstats-gpu
-    /usr/share/libalpm/hooks/99-tb321fu-disable-stock-ksystemstats-gpu.hook
     /usr/share/tb321fu-ksystemstats-gpu/ksystemstats_plugin_tb321fu_gpu.so.sha256
+    /etc/systemd/user/plasma-ksystemstats.service.d/90-tb321fu-gpu-provider.conf
   )
 
   if arch_chroot /usr/bin/pacman -Q tb321fu-imported-release-payload >/dev/null 2>&1; then
@@ -1469,6 +2243,7 @@ verify_tb321fu_native_package_integrity() {
   fi
   if ci_bool "$BUILD_TB321FU_GPU_SENSOR"; then
     packages+=(tb321fu-ksystemstats-gpu)
+    packages+=(ksystemstats)
   fi
 
   for package in "${packages[@]}"; do
@@ -1488,6 +2263,10 @@ verify_tb321fu_native_package_integrity() {
       [ "$owner" = tb321fu-ksystemstats-gpu ] || \
         ci_die "GPU payload has wrong pacman owner $owner: $path"
     done
+    stock_owner=$(arch_chroot /usr/bin/pacman -Qoq /usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so) || \
+      ci_die "stock KSystemStats GPU plugin is not pacman-owned"
+    [ "$stock_owner" = ksystemstats ] || \
+      ci_die "stock KSystemStats GPU plugin has wrong pacman owner: $stock_owner"
     (
       cd "$rootfs_dir"
       sha256sum -c ./usr/share/tb321fu-ksystemstats-gpu/ksystemstats_plugin_tb321fu_gpu.so.sha256
@@ -1620,30 +2399,91 @@ KWINOUTPUTCONFIG
 copy_skel_to_user() {
   local root=$1
   local user_home="$root/home/$DEFAULT_USER_NAME"
-  local group_name
+  local user_uid user_gid relative source_file destination_file destination_dir
 
-  [ -d "$user_home" ] || return 0
-  group_name=$(arch_chroot id -gn "$DEFAULT_USER_NAME")
+  if [ ! -e "$user_home" ]; then
+    [ ! -L "$user_home" ] || ci_die "default user home is a dangling symlink: $user_home"
+    return 0
+  fi
+  [ -d "$user_home" ] && [ ! -L "$user_home" ] ||
+    ci_die "default user home is not a real directory: $user_home"
+  user_uid=$(arch_chroot id -u "$DEFAULT_USER_NAME") ||
+    ci_die "cannot resolve default user UID inside the image: $DEFAULT_USER_NAME"
+  user_gid=$(arch_chroot id -g "$DEFAULT_USER_NAME") ||
+    ci_die "cannot resolve default user GID inside the image: $DEFAULT_USER_NAME"
+  [[ "$user_uid" =~ ^[0-9]{1,10}$ ]] && (( 10#$user_uid <= 4294967294 )) ||
+    ci_die "default user has an invalid image UID: $user_uid"
+  [[ "$user_gid" =~ ^[0-9]{1,10}$ ]] && (( 10#$user_gid <= 4294967294 )) ||
+    ci_die "default user has an invalid image GID: $user_gid"
+  [ -e "$user_home/.config" ] || install -d -m 0755 "$user_home/.config"
+  [ -d "$user_home/.config" ] && [ ! -L "$user_home/.config" ] ||
+    ci_die "user configuration directory is not a real directory: $user_home/.config"
   install -d -m 0755 "$user_home/.config"
 
-  local skel_config
-  for skel_config in kwinrc plasmakeyboardrc kwinoutputconfig.json; do
-    cp -a "$root/etc/skel/.config/$skel_config" "$user_home/.config/$skel_config"
+  for relative in kwinrc plasmakeyboardrc kwinoutputconfig.json; do
+    source_file="$root/etc/skel/.config/$relative"
+    destination_file="$user_home/.config/$relative"
+    [ -f "$source_file" ] && [ ! -L "$source_file" ] ||
+      ci_die "missing or unsafe skeleton configuration: $relative"
+    if [ -L "$destination_file" ]; then
+      ci_die "refusing to follow existing user configuration symlink: $relative"
+    elif [ -e "$destination_file" ]; then
+      [ -f "$destination_file" ] ||
+        ci_die "existing user configuration is not a regular file: $relative"
+    else
+      # --update=none keeps a file created between the existence check and cp
+      # intact; defaults are only seeds, never an update mechanism.
+      cp -a --update=none -- "$source_file" "$destination_file"
+      [ -f "$destination_file" ] && [ ! -L "$destination_file" ] ||
+        ci_die "failed to seed user configuration: $relative"
+    fi
   done
 
   if ci_bool "$INSTALL_FCITX5_CHINESE"; then
+    for relative in \
+      environment.d \
+      autostart \
+      fcitx5 \
+      plasma-workspace \
+      plasma-workspace/env; do
+      destination_dir="$user_home/.config/$relative"
+      [ ! -L "$destination_dir" ] ||
+        ci_die "refusing to follow existing user configuration directory symlink: $relative"
+    done
     install -d -m 0755 \
       "$user_home/.config/environment.d" \
       "$user_home/.config/autostart" \
       "$user_home/.config/fcitx5" \
       "$user_home/.config/plasma-workspace/env"
-    cp -a "$root/etc/skel/.config/environment.d/90-fcitx5.conf" "$user_home/.config/environment.d/90-fcitx5.conf"
-    cp -a "$root/etc/skel/.config/autostart/org.fcitx.Fcitx5.desktop" "$user_home/.config/autostart/org.fcitx.Fcitx5.desktop"
-    cp -a "$root/etc/skel/.config/fcitx5/profile" "$user_home/.config/fcitx5/profile"
-    cp -a "$root/etc/skel/.config/plasma-workspace/env/fcitx5.sh" "$user_home/.config/plasma-workspace/env/fcitx5.sh"
+    for relative in \
+      environment.d/90-fcitx5.conf \
+      autostart/org.fcitx.Fcitx5.desktop \
+      fcitx5/profile \
+      plasma-workspace/env/fcitx5.sh; do
+      source_file="$root/etc/skel/.config/$relative"
+      destination_file="$user_home/.config/$relative"
+      destination_dir=${destination_file%/*}
+      [ -d "$destination_dir" ] && [ ! -L "$destination_dir" ] ||
+        ci_die "user configuration parent is not a real directory: $destination_dir"
+      [ -f "$source_file" ] && [ ! -L "$source_file" ] ||
+        ci_die "missing or unsafe skeleton configuration: $relative"
+      if [ -L "$destination_file" ]; then
+        ci_die "refusing to follow existing user configuration symlink: $relative"
+      elif [ -e "$destination_file" ]; then
+        [ -f "$destination_file" ] ||
+          ci_die "existing user configuration is not a regular file: $relative"
+      else
+        cp -a --update=none -- "$source_file" "$destination_file"
+        [ -f "$destination_file" ] && [ ! -L "$destination_file" ] ||
+          ci_die "failed to seed user configuration: $relative"
+      fi
+    done
   fi
 
-  chroot "$root" chown -R "$DEFAULT_USER_NAME:$group_name" "/home/$DEFAULT_USER_NAME/.config"
+  # Resolve identities inside the image, then use numeric IDs on the host.
+  # Image-only account names are normally absent from the build runner's NSS.
+  find -P "$user_home/.config" -exec chown --no-dereference \
+    "$user_uid:$user_gid" -- {} +
 }
 
 build_package_list() {
@@ -1723,17 +2563,7 @@ tar -C "$rootfs_dir" -xpf "$rootfs_archive" --numeric-owner
 
 install -d -m 0755 "$rootfs_dir/etc/pacman.d" "$rootfs_dir/etc/systemd/system"
 printf 'Server = %s\n' "$ARCH_MIRROR" > "$rootfs_dir/etc/pacman.d/mirrorlist"
-rm -f "$rootfs_dir/etc/resolv.conf"
-cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
-if ! awk '
-  /^[[:space:]]*nameserver[[:space:]]+/ {
-    ns=$2
-    if (ns !~ /^(127\.|::1$|0\.0\.0\.0$)/) good=1
-  }
-  END { exit good ? 0 : 1 }
-' "$rootfs_dir/etc/resolv.conf"; then
-  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$rootfs_dir/etc/resolv.conf"
-fi
+prepare_rootfs_resolver
 
 mount_chroot_runtime
 
@@ -1758,15 +2588,24 @@ cat > "$rootfs_dir/etc/hosts" <<HOSTS
 127.0.1.1 $HOSTNAME_NAME.localdomain $HOSTNAME_NAME
 HOSTS
 
-for locale in $LOCALES; do
-  if grep -q "^#${locale} UTF-8" "$rootfs_dir/etc/locale.gen"; then
-    sed -i "s/^#${locale} UTF-8/${locale} UTF-8/" "$rootfs_dir/etc/locale.gen"
-  elif ! grep -q "^${locale} UTF-8" "$rootfs_dir/etc/locale.gen"; then
-    printf '%s UTF-8\n' "$locale" >> "$rootfs_dir/etc/locale.gen"
-  fi
+read -r -a locale_list <<< "$LOCALES"
+for locale in "${locale_list[@]}"; do
+  locale_file="$rootfs_dir/etc/locale.gen"
+  locale_tmp="$work_dir/locale.gen.tmp"
+  awk -v target="$locale UTF-8" '
+    $0 == "#" target { print target; found = 1; next }
+    $0 == target { found = 1 }
+    { print }
+    END { if (!found) print target }
+  ' "$locale_file" > "$locale_tmp"
+  chmod --reference="$locale_file" "$locale_tmp"
+  chown --reference="$locale_file" "$locale_tmp"
+  mv -f -- "$locale_tmp" "$locale_file"
 done
 arch_chroot /usr/bin/locale-gen
 printf 'LANG=%s\n' "$LANG_NAME" > "$rootfs_dir/etc/locale.conf"
+zoneinfo_target="$rootfs_dir/usr/share/zoneinfo/$TZ_REGION"
+[ -f "$zoneinfo_target" ] || ci_die "requested timezone is not present in the Arch rootfs: $TZ_REGION"
 ln -sfn "/usr/share/zoneinfo/$TZ_REGION" "$rootfs_dir/etc/localtime"
 
 cat > "$rootfs_dir/etc/fstab" <<FSTAB
@@ -1869,15 +2708,20 @@ if [ -n "$OVERLAY_DIR" ]; then
   ci_validate_rootfs_overlay_tree "$OVERLAY_DIR"
 fi
 
+# The runner resolver is needed only for package/bootstrap networking. Restore
+# the archive's resolver before any overlay, manifest or image bytes are final.
+restore_rootfs_resolver
 unmount_chroot_runtime
 
 if [ -n "$overlay_stage" ]; then
   ci_log "applying staged overlay archive: $OVERLAY_ARCHIVE"
-  rsync -aHAX --numeric-ids "$overlay_stage"/ "$rootfs_dir"/
+  ci_validate_rootfs_overlay_tree "$overlay_stage"
+  rsync -aHAX --one-file-system --numeric-ids -- "$overlay_stage"/ "$rootfs_dir"/
 fi
 if [ -n "$OVERLAY_DIR" ]; then
   ci_log "applying validated overlay directory: $OVERLAY_DIR"
-  rsync -aHAX --numeric-ids "$OVERLAY_DIR"/ "$rootfs_dir"/
+  ci_validate_rootfs_overlay_tree "$OVERLAY_DIR"
+  rsync -aHAX --one-file-system --numeric-ids -- "$OVERLAY_DIR"/ "$rootfs_dir"/
 fi
 
 mount_chroot_runtime
@@ -1925,6 +2769,7 @@ generated=$(ci_iso8601_timestamp)
 distribution=Arch Linux ARM
 arch=aarch64
 arch_rootfs_url=$ARCH_ROOTFS_URL
+arch_rootfs_sha256=$ARCH_ROOTFS_SHA256
 arch_mirror=$ARCH_MIRROR
 desktop_profile=$DESKTOP_PROFILE
 rootfs_image_size=$ROOTFS_IMAGE_SIZE
@@ -2001,7 +2846,7 @@ case "$COMPRESS" in
   *) ci_die "unsupported COMPRESS=$COMPRESS" ;;
 esac
 
-if [ "$COMPRESS" != none ] && [ "$KEEP_RAW_IMAGE" != 1 ]; then
+if [ "$COMPRESS" != none ] && ! ci_bool "$KEEP_RAW_IMAGE"; then
   rm -f "$rootfs_img"
 fi
 

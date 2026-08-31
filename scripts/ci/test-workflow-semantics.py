@@ -61,6 +61,25 @@ def require_mapping(value: object, label: str) -> dict:
     return value
 
 
+def validate_release_staging(run: str) -> None:
+    required = (
+        "release_dir=out/ci-release/assets",
+        "split_large_release_assets",
+        '(cd "$release_dir" && sha256sum * > SHA256SUMS.txt)',
+        'bash scripts/ci/publish-release.sh "$RELEASE_TAG" "$release_dir" "$notes"',
+    )
+    missing = [token for token in required if token not in run]
+    if missing:
+        fail(f"release staging is missing required operations: {missing}")
+    split_at = run.rfind("split_large_release_assets")
+    manifest_at = run.find('(cd "$release_dir" && sha256sum * > SHA256SUMS.txt)')
+    publish_at = run.find("bash scripts/ci/publish-release.sh")
+    if not split_at < manifest_at < publish_at:
+        fail("release staging must split assets, write the flat manifest, then publish")
+    if "out/ci-release/SHA256SUMS.txt" in run:
+        fail("release staging reuses the directory-qualified artifact manifest")
+
+
 def validate_structure(workflow: pathlib.Path, data: dict) -> None:
     dispatch = require_mapping(
         require_mapping(data.get("on"), "on").get("workflow_dispatch"),
@@ -85,6 +104,7 @@ def validate_structure(workflow: pathlib.Path, data: dict) -> None:
 
     checkout_seen = False
     rootfs_step = None
+    release_step = None
     for index, raw_step in enumerate(steps):
         step = require_mapping(raw_step, f"jobs.build.steps[{index}]")
         uses = step.get("uses")
@@ -102,11 +122,16 @@ def validate_structure(workflow: pathlib.Path, data: dict) -> None:
                 fail(f"step {index} embeds a dispatch input directly in shell")
             if "build-rootfs-image.sh" in run or "build-arch-rootfs-image.sh" in run:
                 rootfs_step = step
+            if step.get("name") == "Upload release assets":
+                release_step = step
 
     if not checkout_seen:
         fail("pinned checkout step is missing")
     if rootfs_step is None:
         fail("rootfs build step is missing")
+    if release_step is None:
+        fail("release asset upload step is missing")
+    validate_release_staging(str(release_step.get("run", "")))
 
     secret_paths: list[tuple[tuple[object, ...], str]] = []
     for path, value in scalar_nodes(data):
@@ -150,11 +175,13 @@ def validate_rootfs_contract(rootfs: pathlib.Path) -> None:
     for token in required:
         if token not in text:
             fail(f"{rootfs}: missing locked absent-secret default: {token}")
+
+
 def run_hostile_config_fixtures(apply_config: pathlib.Path) -> None:
     with tempfile.TemporaryDirectory(prefix="tb321fu-workflow-fixture.") as temp:
         root = pathlib.Path(temp)
         marker = root / "executed"
-        config = root / "hostile.env"
+        config = root / "rootfs.env"
         github_env = root / "github.env"
         literal = f"$(touch {marker})"
         config.write_text(f"OUTPUT_PREFIX={literal}\n", encoding="utf-8")
@@ -172,6 +199,92 @@ def run_hostile_config_fixtures(apply_config: pathlib.Path) -> None:
             fail("hostile dispatch/config value executed command substitution")
         if literal not in github_env.read_text(encoding="utf-8"):
             fail("hostile value was not preserved literally in GITHUB_ENV")
+
+        # A key from another domain must never reach the workflow environment.
+        cross_domain = root / "boot.env"
+        cross_output = root / "cross-github.env"
+        cross_domain.write_text("ROOTFS_IMAGE_SIZE=20G\n", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(apply_config), str(cross_domain)],
+            env={"PATH": "/usr/bin:/bin", "GITHUB_ENV": str(cross_output)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("boot config accepted a rootfs-only key")
+        if cross_output.exists() and cross_output.stat().st_size:
+            fail("cross-domain rejection partially serialized output")
+
+        source_cross = root / "source.env"
+        source_output = root / "source-cross-github.env"
+        source_cross.write_text("BOOT_TEMPLATE_IMAGE=https://example.com/template.img\n", encoding="utf-8")
+        result = subprocess.run(
+            ["bash", str(apply_config), str(source_cross)],
+            env={"PATH": "/usr/bin:/bin", "GITHUB_ENV": str(source_output)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("source config accepted a boot-only key")
+        if source_output.exists() and source_output.stat().st_size:
+            fail("source cross-domain rejection partially serialized output")
+
+        nul_config = root / "nul.env"
+        nul_config.write_bytes(b"OUTPUT_PREFIX=valid\x00\n")
+        nul_output = root / "nul-github.env"
+        result = subprocess.run(
+            ["bash", str(apply_config), str(nul_config)],
+            env={"PATH": "/usr/bin:/bin", "GITHUB_ENV": str(nul_output)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("workflow config accepted a NUL byte")
+
+        first = root / "first-source.bin"
+        first.write_bytes(b"source")
+        link = root / "source-link.bin"
+        link.symlink_to(first)
+        link_config = root / "source-link.env"
+        # Use the required basename while keeping the symlink in the value.
+        link_config = root / "source.env"
+        link_config.write_text(f"KERNEL_IMAGE={link}\n", encoding="utf-8")
+        link_output = root / "link-github.env"
+        result = subprocess.run(
+            ["bash", str(apply_config), str(link_config)],
+            env={"PATH": "/usr/bin:/bin", "GITHUB_ENV": str(link_output)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("workflow config accepted a local source symlink")
+
+        duplicate = root / "duplicate.env"
+        duplicate.write_text("OUTPUT_PREFIX=first\nOUTPUT_PREFIX=second\n", encoding="utf-8")
+        duplicate = root / "rootfs.env"
+        duplicate.write_text("OUTPUT_PREFIX=first\nOUTPUT_PREFIX=second\n", encoding="utf-8")
+        duplicate_output = root / "duplicate-github.env"
+        result = subprocess.run(
+            ["bash", str(apply_config), str(duplicate)],
+            env={"PATH": "/usr/bin:/bin", "GITHUB_ENV": str(duplicate_output)},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            fail(f"duplicate config keys were not resolved: {result.stderr}")
+        serialized = duplicate_output.read_text(encoding="utf-8")
+        if "second" not in serialized or "first" in serialized:
+            fail("duplicate config key did not resolve to the last value")
 
         secret_config = root / "secret.env"
         secret_output = root / "secret-github.env"
@@ -203,6 +316,27 @@ def self_test() -> None:
         "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
     ):
         fail("self-test rejected a commit-pinned action")
+    valid_release_staging = "\n".join(
+        (
+            "release_dir=out/ci-release/assets",
+            "split_large_release_assets() { :; }",
+            "split_large_release_assets",
+            '(cd "$release_dir" && sha256sum * > SHA256SUMS.txt)',
+            'bash scripts/ci/publish-release.sh "$RELEASE_TAG" "$release_dir" "$notes"',
+        )
+    )
+    validate_release_staging(valid_release_staging)
+    try:
+        validate_release_staging(
+            valid_release_staging.replace(
+                '(cd "$release_dir" && sha256sum * > SHA256SUMS.txt)',
+                "cp out/ci-release/SHA256SUMS.txt \"$release_dir\"/SHA256SUMS.txt",
+            )
+        )
+    except SystemExit:
+        pass
+    else:
+        fail("self-test accepted reuse of the directory-qualified artifact manifest")
     print("workflow semantic self-test: PASS")
 
 

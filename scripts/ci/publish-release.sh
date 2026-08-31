@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# A caller may enable tracing globally (for example with `bash -x`).  Release
+# credentials must never be emitted by this script, so disable tracing before
+# reading or validating the token.
+set +x
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 release_tag=${1:?usage: publish-release.sh RELEASE_TAG RELEASE_DIR NOTES_FILE}
 release_dir=${2:?usage: publish-release.sh RELEASE_TAG RELEASE_DIR NOTES_FILE}
@@ -8,6 +14,18 @@ notes_file=${3:?usage: publish-release.sh RELEASE_TAG RELEASE_DIR NOTES_FILE}
 : "${GH_TOKEN:?RELEASE_TOKEN must be exposed as GH_TOKEN only for this step}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
+
+case "$GH_TOKEN" in
+  *$'\r'*|*$'\n'*)
+    printf 'GH_TOKEN contains a forbidden CR/LF byte\n' >&2
+    exit 1
+    ;;
+esac
+token_bytes=$(LC_ALL=C printf '%s' "$GH_TOKEN" | LC_ALL=C wc -c)
+(( token_bytes <= 4096 )) || {
+  printf 'GH_TOKEN exceeds the 4096-byte limit\n' >&2
+  exit 1
+}
 
 [ "${PRERELEASE:-}" = 1 ] || {
   printf 'PRERELEASE must be exactly 1 for immutable remediation publication\n' >&2
@@ -32,7 +50,17 @@ release_kind=prerelease
 [ -d "$release_dir" ] || { printf 'release directory not found: %s\n' "$release_dir" >&2; exit 1; }
 [ -f "$notes_file" ] || { printf 'release notes not found: %s\n' "$notes_file" >&2; exit 1; }
 
-for command_name in gh curl sha256sum stat find sort awk grep uniq wc seq sleep; do
+# The workflow gate is intentionally repeated here.  A direct invocation must
+# not be able to turn a rolling, unprovenanced Arch tree into a public release
+# merely by setting PRERELEASE or forging a workflow-side marker.
+provenance_validator="$SCRIPT_DIR/validate-release-input-provenance.sh"
+[ -f "$provenance_validator" ] && [ ! -L "$provenance_validator" ] || {
+  printf 'release provenance validator is missing or unsafe\n' >&2
+  exit 1
+}
+RELEASE_TAG="$release_tag" PRERELEASE=1 bash "$provenance_validator"
+
+for command_name in gh curl env sha256sum stat find sort awk grep uniq wc seq sleep; do
   command -v "$command_name" >/dev/null || {
     printf 'required command not found: %s\n' "$command_name" >&2
     exit 1
@@ -62,7 +90,7 @@ manifest_names=$(awk '
   length($1) != 64 || $1 !~ /^[0-9a-fA-F]+$/ { exit 2 }
   {
     name = substr($0, 67)
-    sub(/^\\*/, "", name)
+    sub(/^\*/, "", name)
     if (name == "" || name == "SHA256SUMS.txt") exit 3
     print name
   }
@@ -82,7 +110,7 @@ manifest_names=$(awk '
 for asset in "${assets[@]}"; do
   asset_name=${asset##*/}
   [ "$asset_name" = SHA256SUMS.txt ] && continue
-  printf '%s\n' "$manifest_names" | grep -Fxq -- "$asset_name" || {
+  grep -Fxq -- "$asset_name" <<< "$manifest_names" || {
     printf 'asset is missing from SHA256SUMS.txt: %s\n' "$asset_name" >&2
     exit 1
   }
@@ -187,7 +215,7 @@ existing_release_tags=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" 
   printf 'cannot establish the existing release set\n' >&2
   exit 1
 }
-if printf '%s\n' "$existing_release_tags" | grep -Fxq -- "$release_tag"; then
+if grep -Fxq -- "$release_tag" <<< "$existing_release_tags"; then
   printf 'refusing to modify an existing release or draft: %s\n' "$release_tag" >&2
   exit 1
 fi
@@ -197,14 +225,13 @@ matching_tag_refs=$(gh api \
   printf 'cannot establish the existing tag set\n' >&2
   exit 1
 }
-if printf '%s\n' "$matching_tag_refs" | grep -Fxq -- "refs/tags/$release_tag"; then
+if grep -Fxq -- "refs/tags/$release_tag" <<< "$matching_tag_refs"; then
   printf 'refusing to publish through an existing tag: %s\n' "$release_tag" >&2
   exit 1
 fi
 
-gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
-  -f "ref=refs/tags/$release_tag" -f "sha=$GITHUB_SHA" >/dev/null
-verify_tag_target || exit 1
+# Let the release API create the tag together with the draft release so a
+# failed release request cannot leave an orphan tag behind.
 release_record=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
   -f "tag_name=$release_tag" \
   -f "target_commitish=$GITHUB_SHA" \
@@ -246,16 +273,38 @@ verify_release_snapshot "$initial_snapshot" "$release_id" true \
   exit 1
 }
 
-for asset in "${assets[@]}"; do
-  asset_name=${asset##*/}
-  curl --fail-with-body --silent --show-error --request POST \
+upload_release_asset() (
+  set +x
+  local asset=$1 asset_name=${1##*/}
+  local auth_header sensitive_name
+  local -a curl_env=(env)
+
+  # Keep the bearer value out of curl argv and out of its inherited
+  # environment. A here-string feeds --header @- from shell memory. Clear
+  # secret variables in this subshell before even starting the env wrapper;
+  # the -u list also protects against aliases exported by the runner.
+  auth_header="Authorization: Bearer $GH_TOKEN"
+  for sensitive_name in \
+    GH_TOKEN RELEASE_TOKEN GITHUB_TOKEN GH_PAT GH_ENTERPRISE_TOKEN \
+    GITHUB_ENTERPRISE_TOKEN ACTIONS_RUNTIME_TOKEN; do
+    curl_env+=(-u "$sensitive_name")
+  done
+  unset GH_TOKEN RELEASE_TOKEN GITHUB_TOKEN GH_PAT GH_ENTERPRISE_TOKEN \
+    GITHUB_ENTERPRISE_TOKEN ACTIONS_RUNTIME_TOKEN
+  "${curl_env[@]}" curl --disable --fail-with-body --silent --show-error \
+    --request POST \
     --header 'Accept: application/vnd.github+json' \
-    --header "Authorization: Bearer $GH_TOKEN" \
+    --header @- \
     --header 'X-GitHub-Api-Version: 2022-11-28' \
     --header 'Content-Type: application/octet-stream' \
     --data-binary "@$asset" \
     "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$asset_name" \
-    >/dev/null
+    <<< "$auth_header"
+  unset auth_header
+)
+
+for asset in "${assets[@]}"; do
+  upload_release_asset "$asset" >/dev/null
 done
 
 verified=false

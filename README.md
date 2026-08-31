@@ -39,7 +39,7 @@ Arch cannot install the existing Ubuntu `.deb` packages with `dpkg`, but the pay
 - Y700/TB321FU systemd services
 - sensor, haptics, camera and audio helper files
 
-The build then runs `depmod -b` for the target kernel and fails if required firmware/modules/services are missing.
+The build then runs `depmod -b` for the target kernel and fails if required firmware/modules/services are missing. Imported files are owned by native Arch packages so later `pacman` transactions can verify and restore them. When the optional TB321FU GPU provider is enabled, the stock `ksystemstats` plugin remains present and package-owned; a user-service systemd namespace drop-in hides it only from the statistics daemon, keeping `pacman -Qkk ksystemstats` consistent across upgrades.
 
 Required compatibility files include:
 
@@ -75,16 +75,18 @@ cat rootfs.img.7z.* > rootfs.img.7z
 
 Common workflow inputs:
 
-- `release_tag`: leave empty to only produce Actions artifacts
+- `release_tag`: leave empty; tagged Arch releases are currently disabled
 - `desktop_profile`: `minimal`, `standard`, or `full`
-- `arch_mirror`: default `http://os.archlinuxarm.org/$arch/$repo`
+- `ARCH_MIRROR`: HTTPS Arch Linux ARM rolling mirror URL ending in `/$arch/$repo`; it is used only by artifact-only builds
 - `rootfs_image_size`: default `20G`
 - `hostname_name`: default `GUF296`
 - `default_user_name`: default `GUF296`
-- `default_user_password`: default `1234`
-- `sddm_autologin`: default enabled
+- password hashes are supplied only through repository secrets; absent hashes create locked accounts
+- `sddm_autologin`: default enabled in the tested release profile
 
 Advanced overrides are available through `rootfs_config` and `boot_config` as `KEY=value` lines.
+
+Arch Linux ARM is a rolling distribution. The `ARCH_ROOTFS_SHA256` value authenticates the selected base tarball, but the mirror URL does not identify repository databases, package versions, signatures, or the dependency closure selected by `pacman -Syu`. The public mirror currently has no reviewed dated snapshot/closure input in this project. Therefore this workflow is intentionally artifact-only: leave `release_tag` empty, and do not treat an Actions artifact as a byte-for-byte reproducible or publishable Arch release. The provenance gate fails closed if a tag is supplied. A tagged release may be enabled only after a reviewed repository snapshot plus complete package/dependency digest manifest is added and bound to the build.
 
 ## First Validation Targets
 

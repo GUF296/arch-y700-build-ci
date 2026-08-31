@@ -2,13 +2,33 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
-PUBLISH=$ROOT/scripts/ci/publish-release.sh
+PUBLISH_PRODUCTION=$ROOT/scripts/ci/publish-release.sh
 WORKFLOW=$ROOT/.github/workflows/build-rootfs-and-grub.yml
 scratch=$(mktemp -d)
 cleanup() {
   case $scratch in /tmp/tmp.*) rm -rf -- "$scratch" ;; esac
 }
 trap cleanup EXIT INT TERM
+
+# Publication behavior is exercised with a fixture validator so the rolling
+# Arch closure gate does not prevent testing upload ordering. The production
+# script is copied unchanged; a separate case below proves its canonical
+# validator is mandatory for direct invocation.
+publisher_fixture_dir=$scratch/publisher-fixture
+mkdir -p "$publisher_fixture_dir"
+cp -- "$PUBLISH_PRODUCTION" "$publisher_fixture_dir/publish-release.sh"
+cat > "$publisher_fixture_dir/validate-release-input-provenance.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${PROVENANCE_FIXTURE:?}"
+: "${PROVENANCE_LOG:?}"
+: "${RELEASE_TAG:?}"
+: "${PRERELEASE:?}"
+mkdir -p "$(dirname -- "$PROVENANCE_LOG")"
+printf '%s\n' "$RELEASE_TAG" >> "$PROVENANCE_LOG"
+SH
+chmod 0755 "$publisher_fixture_dir/validate-release-input-provenance.sh"
+PUBLISH=$publisher_fixture_dir/publish-release.sh
 
 fakebin=$scratch/fakebin
 mkdir -p "$fakebin"
@@ -33,12 +53,20 @@ api_version=false
 content_type=false
 while [ "$#" -gt 0 ]; do
   case $1 in
-    --fail-with-body|--silent|--show-error) shift ;;
+    --disable|--fail-with-body|--silent|--show-error) shift ;;
     --request) method=$2; shift 2 ;;
     --header)
       case $2 in
         'Accept: application/vnd.github+json') accept=true ;;
-        'Authorization: Bearer test-release-token') authorization=true ;;
+        @-)
+          auth_header=
+          IFS= read -r auth_header || true
+          [ "$auth_header" = 'Authorization: Bearer test-release-token' ] || {
+            printf 'unexpected stdin authorization header: %s\n' "$auth_header" >&2
+            exit 2
+          }
+          authorization=true
+          ;;
         'X-GitHub-Api-Version: 2022-11-28') api_version=true ;;
         'Content-Type: application/octet-stream') content_type=true ;;
         *) printf 'unexpected curl header: %s\n' "$2" >&2; exit 2 ;;
@@ -50,6 +78,8 @@ while [ "$#" -gt 0 ]; do
     *) printf 'unexpected curl argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+[ -z "${GH_TOKEN:-}" ] || { printf 'curl inherited GH_TOKEN\n' >&2; exit 2; }
+[ -z "${RELEASE_TOKEN:-}" ] || { printf 'curl inherited RELEASE_TOKEN\n' >&2; exit 2; }
 [ "$method" = POST ]
 $accept
 $authorization
@@ -142,7 +172,12 @@ if [ "${1:-}" = api ]; then
         ;;
       repos/owner/repository/releases)
         [ "${GH_FAIL_RELEASE_CREATE:-0}" != 1 ] || exit 72
-        [ -f "$GH_STATE/tag-exists" ]
+        # The production publisher asks GitHub to create the tag together with
+        # the draft release.  A failed create therefore must not leave a tag;
+        # a successful create records the tag object before returning the
+        # release response so subsequent identity checks exercise the real
+        # ordering.
+        [ ! -f "$GH_STATE/tag-exists" ] || exit 65
         [ ! -f "$GH_STATE/exists" ] || exit 66
         tag=
         target=
@@ -170,6 +205,17 @@ if [ "${1:-}" = api ]; then
         [ -f "${body#@}" ]
         [ "$draft" = true ]
         [ "$prerelease" = false ]
+        tag_target=${GH_CREATE_TAG_TARGET:-$target}
+        : > "$GH_STATE/tag-exists"
+        if [ "${GH_ANNOTATED_TAG:-0}" = 1 ]; then
+          printf 'tag\n' > "$GH_STATE/tag-type"
+          printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' > "$GH_STATE/tag-object"
+          printf 'commit\n' > "$GH_STATE/peeled-type"
+          printf '%s\n' "$tag_target" > "$GH_STATE/peeled-object"
+        else
+          printf 'commit\n' > "$GH_STATE/tag-type"
+          printf '%s\n' "$tag_target" > "$GH_STATE/tag-object"
+        fi
         reported_tag=${GH_RELEASE_TAG_RESPONSE:-$tag}
         reported_target=${GH_RELEASE_TARGET_RESPONSE:-$target}
         : > "$GH_STATE/exists"
@@ -296,14 +342,51 @@ printf 'beta\n' > "$scratch/release/beta.bin"
 (cd "$scratch/release" && sha256sum alpha.bin beta.bin > SHA256SUMS.txt)
 printf '# Notes\n' > "$scratch/notes.md"
 
+grep -Fq 'validate-release-input-provenance.sh' "$PUBLISH_PRODUCTION" || {
+  printf 'production publisher does not invoke the canonical provenance validator\n' >&2
+  exit 1
+}
+production_state=$scratch/state-production-provenance
+if PATH="$fakebin:$PATH" GH_STATE="$production_state" GH_TOKEN=test-release-token \
+    GITHUB_REPOSITORY=owner/repository \
+    GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 PRERELEASE=1 \
+    bash "$PUBLISH_PRODUCTION" test-20260715 "$scratch/release" "$scratch/notes.md" \
+    >/dev/null 2>&1; then
+  printf 'direct production publisher invocation bypassed provenance gate\n' >&2
+  exit 1
+fi
+[ ! -f "$production_state/calls.log" ] || {
+  printf 'provenance failure occurred after a GitHub API call\n' >&2
+  exit 1
+}
+printf 'PASS direct publisher invocation is provenance-gated\n'
+
 run_publish() {
   local state=$1
   shift
   PATH="$fakebin:$PATH" GH_STATE="$state" GH_TOKEN=test-release-token \
+    PROVENANCE_FIXTURE=1 PROVENANCE_LOG="$state/provenance.log" \
     GITHUB_REPOSITORY=owner/repository \
     GITHUB_SHA=0123456789abcdef0123456789abcdef01234567 \
     "$@" bash "$PUBLISH" test-20260715 "$scratch/release" "$scratch/notes.md"
 }
+
+crlf_token=$(printf 'bad\rtoken')
+state_token_crlf=$scratch/state-token-crlf
+if run_publish "$state_token_crlf" env PRERELEASE=1 GH_TOKEN="$crlf_token" >/dev/null 2>&1; then
+  printf 'CR/LF bearer token was accepted\n' >&2
+  exit 1
+fi
+[ ! -f "$state_token_crlf/calls.log" ]
+
+long_token=$(printf 'x%.0s' {1..4097})
+state_token_long=$scratch/state-token-long
+if run_publish "$state_token_long" env PRERELEASE=1 GH_TOKEN="$long_token" >/dev/null 2>&1; then
+  printf 'overlong bearer token was accepted\n' >&2
+  exit 1
+fi
+[ ! -f "$state_token_long/calls.log" ]
+printf 'PASS bearer token CR/LF and byte-length boundaries\n'
 
 state_missing=$scratch/state-missing
 if run_publish "$state_missing" env >/dev/null 2>&1; then
@@ -351,7 +434,7 @@ if run_publish "$state_create_api_fail" env PRERELEASE=1 \
   printf 'release create API failure was accepted\n' >&2
   exit 1
 fi
-[ -f "$state_create_api_fail/tag-exists" ]
+[ ! -f "$state_create_api_fail/tag-exists" ]
 [ ! -f "$state_create_api_fail/exists" ]
 [ ! -f "$state_create_api_fail/patch-fields.log" ]
 
@@ -411,8 +494,11 @@ if run_publish "$state_tag_race" env PRERELEASE=1 \
   printf 'racing mismatched tag target was accepted\n' >&2
   exit 1
 fi
-[ ! -f "$state_tag_race/exists" ]
-[ ! -f "$state_tag_race/assets.tsv" ]
+[ -f "$state_tag_race/exists" ]
+[ -f "$state_tag_race/tag-exists" ]
+[ "$(cat "$state_tag_race/draft")" = true ]
+[ -f "$state_tag_race/assets.tsv" ]
+[ ! -s "$state_tag_race/assets.tsv" ]
 [ ! -f "$state_tag_race/patch-fields.log" ]
 
 state_annotated=$scratch/state-annotated

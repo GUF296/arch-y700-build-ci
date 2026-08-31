@@ -51,6 +51,28 @@ chmod 0644 "$root/usr/libexec/tb321fu-haptics/bind-aw86937" \
 
 ci_normalize_system_payload_modes "$root"
 ci_assert_normalized_system_payload_modes "$root"
+if [ "$EUID" -eq 0 ]; then
+  # Simulate a user-owned checkout copied into a package stage, then require
+  # production normalization to restore root ownership without following the
+  # symlink at /lib.
+  chown -R 1000:1000 -- "$root"
+  ci_normalize_system_payload_ownership "$root"
+  ci_assert_system_payload_root_owned "$root"
+
+  # Ownership checks must be about the symlink inode, not the target it
+  # names.  A hostile non-root link to a root-owned file must fail closed.
+  printf 'root target\n' > "$root/owner-target"
+  chown 0:0 "$root/owner-target"
+  ln -s owner-target "$root/owner-link"
+  chown -h 1000:1000 "$root/owner-link"
+  if (ci_assert_system_payload_root_owned "$root") >/dev/null 2>&1; then
+    echo 'non-root-owned symlink was accepted by the ownership assertion' >&2
+    exit 1
+  fi
+  [ "$(ci_lstat_owner "$root/owner-target")" = 0:0 ]
+  rm -f "$root/owner-link" "$root/owner-target"
+  ci_assert_system_payload_root_owned "$root"
+fi
 ci_assert_privileged_payload_security "$root" \
   usr/libexec/tb321fu-haptics/bind-aw86937 \
   opt/libcamera-y700/bin/cam \
@@ -77,7 +99,22 @@ if (ci_assert_privileged_payload_security "$root" etc/systemd/system/fixture.ser
   exit 1
 fi
 
+# A hard link can point at an inode shared with a path outside the package
+# stage.  The policy must reject it before any ownership or mode mutation.
+printf 'shared inode\n' > "$outside/shared-inode"
+ln "$outside/shared-inode" "$root/usr/lib/firmware/shared-inode"
+if (ci_assert_no_hardlinked_system_payload "$root" >/dev/null 2>&1); then
+  echo 'hard-linked payload was accepted' >&2
+  exit 1
+fi
+if (ci_assert_normalized_system_payload_modes "$root" >/dev/null 2>&1); then
+  echo 'hard-linked payload passed the normalized-mode assertion' >&2
+  exit 1
+fi
+
 grep -F 'ci_normalize_system_payload_modes "$stage"' \
+  "$SCRIPT_DIR/build-arch-rootfs-image.sh" >/dev/null
+grep -F 'ci_normalize_system_payload_ownership "$stage"' \
   "$SCRIPT_DIR/build-arch-rootfs-image.sh" >/dev/null
 grep -F 'ci_assert_privileged_payload_security "$rootfs_dir"' \
   "$SCRIPT_DIR/build-arch-rootfs-image.sh" >/dev/null

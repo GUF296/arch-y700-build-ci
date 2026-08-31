@@ -5,11 +5,16 @@
 /* SPDX-License-Identifier: MIT */
 
 #include <array>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstddef>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -57,16 +62,21 @@ namespace {
 
 #define MAX_BUFFERS	32
 #define MASK_BUFFERS	31
+#define COMPLETION_RING_SIZE	64
+#define COMPLETION_RING_MASK	(COMPLETION_RING_SIZE - 1)
 
 #define BUFFER_FLAG_OUTSTANDING	(1<<0)
 
 struct buffer {
-	uint32_t id;
-	uint32_t flags;
-	struct spa_list link;
-	struct spa_buffer *outbuf;
-	struct spa_meta_header *h;
-	struct spa_meta_videotransform *videotransform;
+	uint32_t id = 0;
+	uint32_t flags = 0;
+	struct spa_list link = {};
+	struct spa_buffer *outbuf = nullptr;
+	struct spa_data *validated_datas = nullptr;
+	uint32_t validated_n_datas = 0;
+	struct spa_meta_header *h = nullptr;
+	struct spa_meta_videotransform *videotransform = nullptr;
+	bool queued = false;
 };
 
 struct port {
@@ -74,7 +84,10 @@ struct port {
 
 	std::optional<spa_video_info> current_format;
 
-	struct spa_fraction rate = {};
+	/* Keep a valid clock rate until the first negotiated format arrives.  A
+	 * zero denominator is later used by the pacing/DLL path and can turn a
+	 * normal startup into undefined timing behaviour. */
+	struct spa_fraction rate = { 30, 1 };
 	StreamConfiguration streamConfig;
 
 	uint32_t buffers_blocks = 1;
@@ -153,12 +166,23 @@ struct impl {
 
 	std::shared_ptr<CameraManager> manager;
 	std::shared_ptr<Camera> camera;
-	const std::unique_ptr<CameraConfiguration> config;
+	/* The configuration object is replaced only after a candidate has been
+	 * validated and configured successfully.  Keeping ownership mutable lets
+	 * format renegotiation retain the old object for rollback. */
+	std::unique_ptr<CameraConfiguration> config;
 
 	FrameBufferAllocator allocator;
 	std::vector<std::unique_ptr<libcamera::Request>> requestPool;
 	spa_ringbuffer completed_requests_rb = SPA_RINGBUFFER_INIT();
-	std::array<libcamera::Request *, MAX_BUFFERS> completed_requests;
+	std::array<libcamera::Request *, COMPLETION_RING_SIZE> completed_requests{};
+	/* The libcamera signal may run concurrently with the PipeWire data loop.
+	 * This lock protects ring slots and the eventfd lifetime. */
+	std::mutex completion_mutex;
+	std::condition_variable completion_cv;
+	unsigned int callbacks_inflight = 0;
+	bool stopping = false;
+	std::atomic<int> completion_error{0};
+	bool signal_connected = false;
 
 	void requestComplete(libcamera::Request *request);
 
@@ -166,8 +190,9 @@ struct impl {
 
 	ControlList ctrls;
 	ControlList initial_controls;
-	bool active = false;
+	std::atomic<bool> active{false};
 	bool acquired = false;
+	bool camera_started = false;
 
 	impl(spa_log *log, spa_loop *data_loop, spa_system *system,
 	     std::shared_ptr<CameraManager> manager, std::shared_ptr<Camera> camera,
@@ -175,36 +200,121 @@ struct impl {
 
 	struct spa_dll dll;
 
-	void stop()
+	int stop()
 	{
-		spa_loop_locked(
-			data_loop,
-			[](spa_loop *, bool, uint32_t, const void *, size_t, void *user_data) {
-				auto *self = static_cast<impl *>(user_data);
-
-				if (self->source.loop)
-					spa_loop_remove_source(self->data_loop, &self->source);
-
-				return 0;
-			},
-			0, nullptr, 0, this
-		);
-
-		camera->requestCompleted.disconnect(this, &impl::requestComplete);
-
-		if (int res = camera->stop(); res < 0) {
-			spa_log_warn(log, "failed to stop camera %s: %s",
-					 camera->id().c_str(), spa_strerror(res));
+		int first_error = 0;
+		{
+			std::lock_guard<std::mutex> guard(completion_mutex);
+			/* Reject new producers before disconnecting the signal.  A producer
+			 * already inside requestComplete is accounted for below. */
+			stopping = true;
+			active.store(false, std::memory_order_release);
 		}
 
-		if (source.fd >= 0)
-			spa_system_close(system, std::exchange(source.fd, -1));
+		if (camera && signal_connected) {
+			camera->requestCompleted.disconnect(this, &impl::requestComplete);
+			signal_connected = false;
+		}
 
-		completed_requests_rb = SPA_RINGBUFFER_INIT();
-		active = false;
+		/* Source removal must run in the data-loop context.  The synchronous
+		 * lock also gives any in-flight source callback a quiescence boundary. */
+		int remove_res = 0;
+		for (unsigned int attempt = 0; source.loop && attempt < 3; ++attempt) {
+			if (!data_loop) {
+				remove_res = -EINVAL;
+				break;
+			}
+			remove_res = spa_loop_invoke(
+				data_loop,
+				[](spa_loop *, bool, uint32_t, const void *, size_t, void *user_data) {
+					auto *self = static_cast<impl *>(user_data);
+					if (!self->source.loop)
+						return 0;
+					return spa_loop_remove_source(self->data_loop, &self->source);
+				},
+				0, nullptr, 0, true, this);
+			if (remove_res >= 0 && !source.loop)
+				break;
+		}
+		if (source.loop) {
+			if (!first_error)
+				first_error = remove_res < 0 ? remove_res : -EBUSY;
+			if (log)
+				spa_log_warn(log, "failed to remove camera event source: %s",
+					spa_strerror(first_error));
+		}
 
-		for (auto& p : out_ports)
+		if (camera && camera_started) {
+			if (int res = camera->stop(); res < 0) {
+				if (!first_error)
+					first_error = res;
+				if (log)
+					spa_log_warn(log, "failed to stop camera %s: %s",
+							 camera->id().c_str(), spa_strerror(res));
+			} else {
+				camera_started = false;
+			}
+		}
+		if (source.loop || camera_started)
+			return first_error < 0 ? first_error : -EBUSY;
+
+		{
+			std::unique_lock<std::mutex> lock(completion_mutex);
+			/* A broken callback must never make clear() wait forever.  Keep
+			 * ownership of every resource when the bounded quiescence wait fails;
+			 * the caller can retry stop() after the provider has settled. */
+			if (!completion_cv.wait_for(lock, std::chrono::seconds(5),
+				[this] { return callbacks_inflight == 0; })) {
+				if (!first_error)
+					first_error = -ETIMEDOUT;
+				return first_error;
+			}
+
+			if (source.fd >= 0 && system) {
+				const int fd = source.fd;
+				const int res = spa_system_close(system, fd);
+				if (res < 0) {
+					if (!first_error)
+						first_error = res;
+					return first_error;
+				}
+				source.fd = -1;
+			} else {
+				source.fd = -1;
+			}
+			source.func = nullptr;
+			source.data = nullptr;
+			source.mask = 0;
+			source.rmask = 0;
+
+			/* Requests already handed to the completion ring still own their
+			 * libcamera buffers. Reuse them before dropping the ring. */
+			for (auto *request : completed_requests) {
+				if (request)
+					request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+			}
+			completed_requests.fill(nullptr);
+			completed_requests_rb = SPA_RINGBUFFER_INIT();
+			/* Do not clear the stopping latch after a failed close.  A later
+			 * stream start is only safe once this complete transition succeeds. */
+			stopping = first_error < 0;
+		}
+
+		for (auto& p : out_ports) {
 			spa_list_init(&p.queue);
+			for (uint32_t i = 0; i < p.n_buffers && i < MAX_BUFFERS; ++i) {
+				SPA_FLAG_CLEAR(p.buffers[i].flags, BUFFER_FLAG_OUTSTANDING);
+				p.buffers[i].queued = false;
+				spa_list_init(&p.buffers[i].link);
+			}
+		}
+		if (first_error < 0)
+			return first_error;
+		{
+			std::lock_guard<std::mutex> guard(completion_mutex);
+			stopping = false;
+		}
+		return 0;
 	}
 };
 
@@ -212,6 +322,12 @@ struct impl {
 
 #define GET_OUT_PORT(impl,p)         (&impl->out_ports[p])
 #define GET_PORT(impl,d,p)           GET_OUT_PORT(impl,p)
+
+int spa_libcamera_clear_buffers(struct port *port);
+int spa_libcamera_stream_on(struct impl *impl);
+int spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
+		struct spa_buffer **buffers, uint32_t n_buffers);
+static void mark_completion_failure(struct impl *impl, int error);
 
 void setup_initial_controls(const ControlInfoMap& ctrl_infos, ControlList& ctrls)
 {
@@ -239,6 +355,8 @@ void setup_initial_controls(const ControlInfoMap& ctrl_infos, ControlList& ctrls
 
 int spa_libcamera_open(struct impl *impl)
 {
+	if (impl == nullptr || !impl->camera)
+		return -EIO;
 	if (impl->acquired)
 		return 0;
 
@@ -258,17 +376,21 @@ int spa_libcamera_open(struct impl *impl)
 
 int spa_libcamera_close(struct impl *impl)
 {
+	if (impl == nullptr)
+		return -EINVAL;
 	struct port *port = &impl->out_ports[0];
 	if (!impl->acquired)
 		return 0;
-	if (impl->active || port->current_format)
+	if (impl->active.load(std::memory_order_acquire) || port->current_format)
 		return 0;
 
 	spa_log_info(impl->log, "close camera %s", impl->camera->id().c_str());
 
-	spa_assert(!impl->allocator.allocated());
+	if (impl->allocator.allocated() || !impl->requestPool.empty())
+		return -EBUSY;
 
-	impl->camera->release();
+	if (impl->camera)
+		impl->camera->release();
 
 	impl->acquired = false;
 	return 0;
@@ -276,36 +398,67 @@ int spa_libcamera_close(struct impl *impl)
 
 int spa_libcamera_buffer_recycle(struct impl *impl, struct port *port, uint32_t buffer_id)
 {
+	if (port == nullptr || buffer_id >= MAX_BUFFERS || buffer_id >= port->n_buffers ||
+		impl == nullptr || buffer_id >= impl->requestPool.size()) {
+		if (impl && impl->log)
+			spa_log_warn(impl->log, "invalid buffer_id %u", buffer_id);
+		return -EINVAL;
+	}
 	struct buffer *b = &port->buffers[buffer_id];
 	int res;
 
 	if (!SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_OUTSTANDING))
 		return 0;
 
-	SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUTSTANDING);
-
-	if (buffer_id >= impl->requestPool.size()) {
-		spa_log_warn(impl->log, "invalid buffer_id %u >= %zu",
-				buffer_id, impl->requestPool.size());
-		return -EINVAL;
-	}
 	Request *request = impl->requestPool[buffer_id].get();
-	if (impl->active) {
+	if (request == nullptr || impl->camera == nullptr)
+		return -EIO;
+	if (request->cookie() != buffer_id) {
+		mark_completion_failure(impl, -EPROTO);
+		return -EPROTO;
+	}
+	SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUTSTANDING);
+	bool should_queue = impl->active.load(std::memory_order_acquire);
+	{
+		std::lock_guard<std::mutex> lock(impl->completion_mutex);
+		should_queue = should_queue && !impl->stopping;
+	}
+	if (should_queue) {
 		request->controls().merge(impl->ctrls);
-		impl->ctrls.clear();
 		if ((res = impl->camera->queueRequest(request)) < 0) {
+			SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
 			spa_log_warn(impl->log, "can't queue buffer %u: %s",
 				buffer_id, spa_strerror(res));
+			mark_completion_failure(impl, res == -EACCES ? -EBUSY : res);
 			return res == -EACCES ? -EBUSY : res;
 		}
+		/* Consume pending controls only after queueRequest accepts the request. */
+		impl->ctrls.clear();
 	}
 	return 0;
 }
 
-void freeBuffers(struct impl *impl, struct port *port)
+int freeBuffers(struct impl *impl, struct port *port)
 {
+	if (impl == nullptr || port == nullptr)
+		return -EINVAL;
+	int result = 0;
 	impl->requestPool.clear();
-	std::ignore = impl->allocator.free(port->streamConfig.stream());
+	if (impl->allocator.allocated()) {
+		if (Stream *stream = port->streamConfig.stream()) {
+			const int res = impl->allocator.free(stream);
+			if (res < 0)
+				result = res;
+			else if (impl->allocator.allocated())
+				result = -EIO;
+		} else {
+			result = -EIO;
+		}
+	}
+	if (result < 0 && impl->log)
+		spa_log_error(impl->log, "failed to free camera buffers: %s",
+				spa_strerror(result));
+	return result;
 }
 
 [[nodiscard]]
@@ -327,10 +480,17 @@ std::size_t count_unique_fds(libcamera::Span<const libcamera::FrameBuffer::Plane
 
 int allocBuffers(struct impl *impl, struct port *port, unsigned int count)
 {
+	if (impl == nullptr || port == nullptr || impl->camera == nullptr ||
+		!impl->config || impl->config->empty() || count == 0 || count > MAX_BUFFERS)
+		return -EINVAL;
 	libcamera::Stream *stream = port->streamConfig.stream();
+	if (stream == nullptr)
+		return -EIO;
 	int res;
 
 	if (!impl->requestPool.empty())
+		return -EBUSY;
+	if (impl->allocator.allocated())
 		return -EBUSY;
 
 	if ((res = impl->allocator.allocate(stream)) < 0)
@@ -343,9 +503,31 @@ int allocBuffers(struct impl *impl, struct port *port, unsigned int count)
 	}
 
 	for (std::size_t i = 0; i < bufs.size(); i++) {
+		if (!bufs[i]) {
+			res = -ENOBUFS;
+			goto err;
+		}
+		const auto &planes = bufs[i]->planes();
+		if (planes.empty()) {
+			res = -ENOBUFS;
+			goto err;
+		}
+		for (const auto &plane : planes) {
+			if (plane.fd.get() < 0 ||
+				plane.length > std::numeric_limits<uint32_t>::max() ||
+				plane.offset > std::numeric_limits<uint32_t>::max() -
+					plane.length) {
+				res = -EOVERFLOW;
+				goto err;
+			}
+		}
 		std::unique_ptr<Request> request = impl->camera->createRequest(i);
 		if (!request) {
 			res = -ENOMEM;
+			goto err;
+		}
+		if (request->cookie() != i) {
+			res = -EINVAL;
 			goto err;
 		}
 
@@ -370,29 +552,55 @@ int allocBuffers(struct impl *impl, struct port *port, unsigned int count)
 	return 0;
 
 err:
-	freeBuffers(impl, port);
+	const int cleanup_res = freeBuffers(impl, port);
+	if (cleanup_res < 0 && impl->log)
+		spa_log_error(impl->log, "camera buffer cleanup failed: %s",
+				spa_strerror(cleanup_res));
 
-	return res;
+	return cleanup_res < 0 ? cleanup_res : res;
 }
 
 int spa_libcamera_clear_buffers(struct port *port)
 {
-	for (std::size_t i = 0; i < port->n_buffers; i++) {
+	if (port == nullptr)
+		return -EINVAL;
+	const uint32_t count = std::min<uint32_t>(port->n_buffers, MAX_BUFFERS);
+	for (uint32_t i = 0; i < count; i++) {
 		buffer *b = &port->buffers[i];
 		spa_buffer *sb = b->outbuf;
 
-		for (std::size_t j = 0; j < sb->n_datas; j++) {
-			auto *d = &sb->datas[j];
-
-			d->type = SPA_ID_INVALID;
-			d->data = nullptr;
-			d->fd = -1;
+		if (b->queued) {
+			spa_list_remove(&b->link);
+			b->queued = false;
+			spa_list_init(&b->link);
 		}
 
-		*b = {};
+		/* Only touch the caller graph which was authenticated at allocation.
+		 * If the caller replaced the pointer concurrently, leave the new graph
+		 * alone and discard our private record. */
+		if (sb != nullptr && sb->datas == b->validated_datas &&
+			b->validated_datas != nullptr) {
+			for (uint32_t j = 0; j < b->validated_n_datas; j++) {
+				auto *d = &b->validated_datas[j];
+
+				d->type = SPA_ID_INVALID;
+				d->data = nullptr;
+				d->fd = -1;
+			}
+		}
+
+		*b = buffer{};
+		spa_list_init(&b->link);
 	}
 
+	spa_list_init(&port->queue);
+	if (port->io && port->io->buffer_id < count) {
+		port->io->buffer_id = SPA_ID_INVALID;
+		if (port->io->status == SPA_STATUS_HAVE_DATA)
+			port->io->status = SPA_STATUS_OK;
+	}
 	port->n_buffers = 0;
+	port->buffers_blocks = 1;
 
 	return 0;
 }
@@ -467,6 +675,17 @@ int score_size(const Size &a, const Size &b)
 	x = (int)a.width - (int)b.width;
 	y = (int)a.height - (int)b.height;
 	return x * x + y * y;
+}
+
+static constexpr struct spa_fraction defaultFramerate = { 30, 1 };
+
+static bool framerate_valid(const struct spa_fraction *framerate)
+{
+	/* Keep the pacing calculation bounded.  Normal camera rates are far below
+	 * this limit; rejecting pathological POD values avoids floating-point
+	 * overflow and divide-by-zero behavior in the DLL clock path. */
+	return framerate != nullptr && framerate->num > 0 && framerate->denom > 0 &&
+		framerate->num <= 1000000 && framerate->denom <= 1000000;
 }
 
 [[nodiscard]]
@@ -639,6 +858,14 @@ next_fmt:
 		spa_pod_builder_rectangle(&b, frameSize.width, frameSize.height);
 	}
 
+	/* Keep the advertised contract explicit even when libcamera does not
+	 * expose a discrete frame-rate list for the stream.  A negotiated rate is
+	 * consumed by spa_libcamera_set_format below. */
+	spa_pod_builder_add(&b,
+			SPA_FORMAT_VIDEO_framerate,
+			SPA_POD_Fraction(&defaultFramerate),
+			0);
+
 	if (streamConfig.colorSpace) {
 		auto colorimetry = color_space_to_colorimetry(*streamConfig.colorSpace);
 
@@ -668,25 +895,30 @@ next_fmt:
 int spa_libcamera_set_format(struct impl *impl, struct port *port,
 		struct spa_video_info *format, bool try_only)
 {
+	if (impl == nullptr || port == nullptr || format == nullptr)
+		return -EINVAL;
 	const struct format_info *info = nullptr;
 	uint32_t video_format;
 	struct spa_rectangle *size = nullptr;
+	struct spa_fraction *framerate = nullptr;
 	CameraConfiguration::Status validation;
-	int res;
 
 	switch (format->media_subtype) {
 	case SPA_MEDIA_SUBTYPE_raw:
 		video_format = format->info.raw.format;
 		size = &format->info.raw.size;
+		framerate = &format->info.raw.framerate;
 		break;
 	case SPA_MEDIA_SUBTYPE_mjpg:
 	case SPA_MEDIA_SUBTYPE_jpeg:
 		video_format = SPA_VIDEO_FORMAT_ENCODED;
 		size = &format->info.mjpg.size;
+		framerate = &format->info.mjpg.framerate;
 		break;
 	case SPA_MEDIA_SUBTYPE_h264:
 		video_format = SPA_VIDEO_FORMAT_ENCODED;
 		size = &format->info.h264.size;
+		framerate = &format->info.h264.framerate;
 		break;
 	default:
 		video_format = SPA_VIDEO_FORMAT_ENCODED;
@@ -695,36 +927,156 @@ int spa_libcamera_set_format(struct impl *impl, struct port *port,
 
 	info = find_format_info_by_media_type(format->media_type,
 					      format->media_subtype, video_format);
-	if (info == nullptr || size == nullptr) {
+	if (info == nullptr || size == nullptr || framerate == nullptr) {
 		spa_log_error(impl->log, "unknown media type %d %d %d", format->media_type,
 			      format->media_subtype, video_format);
 		return -EINVAL;
 	}
-	StreamConfiguration& streamConfig = impl->config->at(0);
+	const struct spa_fraction selected_rate = framerate_valid(framerate)
+		? *framerate : defaultFramerate;
+	if (size->width == 0 || size->height == 0)
+		return -EINVAL;
+	if (!impl->camera)
+		return -EIO;
 
+	/* Validate a detached candidate first.  TEST_ONLY therefore cannot
+	 * mutate the live configuration, rate or allocator state. */
+	auto candidate = impl->camera->generateConfiguration({ StreamRole::VideoRecording });
+	if (!candidate || candidate->empty())
+		return -EIO;
+	StreamConfiguration& streamConfig = candidate->at(0);
 	streamConfig.pixelFormat = info->pix;
 	streamConfig.size.width = size->width;
 	streamConfig.size.height = size->height;
 	streamConfig.bufferCount = 8;
 
-	validation = impl->config->validate();
+	validation = candidate->validate();
 	if (validation == CameraConfiguration::Invalid)
 		return -EINVAL;
 
 	if (try_only)
 		return 0;
 
-	if ((res = spa_libcamera_open(impl)) < 0)
-		return res;
+	/* Keep the previous object and caller-owned buffer graph intact until the
+	 * replacement has been configured and allocated.  If any step fails, the
+	 * old camera and SPA buffers are reconstructed before returning the original
+	 * error. */
+	const auto old_format = port->current_format;
+	const StreamConfiguration old_stream = port->streamConfig;
+	const struct spa_fraction old_rate = port->rate;
+	const bool was_acquired = impl->acquired;
+	const bool was_active = impl->active.load(std::memory_order_acquire);
+	const bool had_allocator = impl->allocator.allocated();
+	const std::size_t old_request_count = impl->requestPool.size();
+	const uint32_t old_n_buffers = std::min<uint32_t>(port->n_buffers, MAX_BUFFERS);
+	std::array<struct spa_buffer *, MAX_BUFFERS> old_buffers{};
+	for (uint32_t i = 0; i < old_n_buffers; ++i)
+		old_buffers[i] = port->buffers[i].outbuf;
 
-	res = impl->camera->configure(impl->config.get());
+	if (was_active) {
+		const int stop_res = impl->stop();
+		if (stop_res < 0)
+			return stop_res;
+	}
+
+	std::unique_ptr<CameraConfiguration> old_config = std::move(impl->config);
+	const unsigned int old_buffer_count = old_request_count > 0
+		? static_cast<unsigned int>(old_request_count)
+		: (old_config && !old_config->empty() ? old_config->at(0).bufferCount : 0);
+
+	auto restore = [&](int original) {
+		int restore_res = 0;
+		/* First retire any candidate-side ownership.  Do not clear the caller's
+		 * graph until this succeeds: a failed allocator teardown must leave the
+		 * old graph untouched and force a later explicit retry. */
+		if (!impl->requestPool.empty() || impl->allocator.allocated())
+			restore_res = freeBuffers(impl, port);
+		if (restore_res == 0 && (!impl->requestPool.empty() || impl->allocator.allocated()))
+			restore_res = -EBUSY;
+		if (restore_res < 0) {
+			impl->config = std::move(old_config);
+			port->streamConfig = old_stream;
+			port->rate = old_rate;
+			mark_completion_failure(impl, restore_res);
+			return restore_res;
+		}
+
+		/* Candidate allocation never owns the old SPA graph.  Clear it only
+		 * while rebuilding the old allocator, then attach the exact same
+		 * caller-owned buffer pointers again. */
+		if (port->n_buffers > 0) {
+			restore_res = spa_libcamera_clear_buffers(port);
+			if (restore_res < 0) {
+				impl->config = std::move(old_config);
+				port->streamConfig = old_stream;
+				port->rate = old_rate;
+				mark_completion_failure(impl, restore_res);
+				return restore_res;
+			}
+		}
+
+		impl->config = std::move(old_config);
+		port->streamConfig = old_stream;
+		port->rate = old_rate;
+		if (restore_res == 0 && impl->config && old_format && !impl->config->empty()) {
+			if (!impl->acquired && was_acquired)
+				restore_res = spa_libcamera_open(impl);
+			if (restore_res == 0)
+				restore_res = impl->camera->configure(impl->config.get());
+			if (restore_res == 0 && had_allocator && old_buffer_count > 0)
+				restore_res = allocBuffers(impl, port, old_buffer_count);
+			if (restore_res == 0 && old_n_buffers > 0)
+				restore_res = spa_libcamera_alloc_buffers(impl, port,
+					old_buffers.data(), old_n_buffers);
+		}
+		if (restore_res == 0 && was_active) {
+			/* The old stream was active when negotiation began.  Restart it only
+			 * after the old allocator and graph are fully restored. */
+			restore_res = spa_libcamera_stream_on(impl);
+		}
+		if (!was_acquired && impl->acquired && !restore_res) {
+			const int close_res = spa_libcamera_close(impl);
+			if (close_res < 0)
+				restore_res = close_res;
+		}
+		if (restore_res < 0)
+			spa_log_error(impl->log, "failed to restore previous camera format: %s",
+					spa_strerror(restore_res));
+		if (restore_res < 0) {
+			mark_completion_failure(impl, restore_res);
+			return restore_res;
+		}
+		return original;
+	};
+
+	if (!impl->requestPool.empty() || impl->allocator.allocated()) {
+		const int free_res = freeBuffers(impl, port);
+		if (free_res < 0)
+			return restore(free_res);
+	}
+
+	int res = spa_libcamera_open(impl);
+	if (res < 0)
+		return restore(res);
+	res = impl->camera->configure(candidate.get());
 	if (res != 0)
-		goto error;
+		return restore(res);
 
+	impl->config = std::move(candidate);
 	port->streamConfig = impl->config->at(0);
+	res = allocBuffers(impl, port, port->streamConfig.bufferCount);
+	if (res < 0)
+		return restore(res);
+	if (old_n_buffers > 0) {
+		res = spa_libcamera_clear_buffers(port);
+		if (res < 0)
+			return restore(res);
+	}
 
-	if ((res = allocBuffers(impl, port, port->streamConfig.bufferCount)) < 0)
-		goto error;
+	/* Publish the normalized rate only after the candidate is fully configured
+	 * and the old caller-owned graph has been detached. */
+	*framerate = selected_rate;
+	port->rate = selected_rate;
 
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_FLAGS | SPA_PORT_CHANGE_MASK_RATE;
 	port->info.flags = SPA_PORT_FLAG_CAN_ALLOC_BUFFERS |
@@ -734,10 +1086,6 @@ int spa_libcamera_set_format(struct impl *impl, struct port *port,
 	port->info.rate = SPA_FRACTION(port->rate.num, port->rate.denom);
 
 	return 0;
-error:
-	spa_libcamera_close(impl);
-	return res;
-
 }
 
 const struct {
@@ -1021,7 +1369,7 @@ int spa_libcamera_apply_controls(struct impl *impl, libcamera::ControlList&& con
 		.controls = &controls,
 	};
 
-	return spa_loop_locked(
+	return spa_loop_invoke(
 		impl->data_loop,
 		[](spa_loop *, bool, uint32_t, const void *data, size_t, void *user_data)
 		{
@@ -1033,7 +1381,7 @@ int spa_libcamera_apply_controls(struct impl *impl, libcamera::ControlList&& con
 
 			return 0;
 		},
-		0, &d, sizeof(d), impl
+		0, &d, sizeof(d), true, impl
 	);
 }
 
@@ -1192,16 +1540,85 @@ static uint32_t y700_effective_spa_transform(struct impl *impl, uint32_t transfo
 static void y700_update_videotransform(struct impl *impl, struct buffer *b)
 {
 	uint32_t transform;
-	if (!b->videotransform)
+	if (!impl || !impl->config || impl->config->empty() || !b || !b->videotransform)
 		return;
 	transform = libcamera_orientation_to_spa_transform_value(impl->config->orientation);
 	b->videotransform->transform = y700_effective_spa_transform(impl, transform);
 }
 
+static void mark_completion_failure(struct impl *impl, int error)
+{
+	if (impl == nullptr)
+		return;
+	if (error >= 0)
+		error = -EIO;
+	int expected = 0;
+	impl->completion_error.compare_exchange_strong(expected, error,
+			std::memory_order_release, std::memory_order_relaxed);
+	impl->active.store(false, std::memory_order_release);
+}
+
+static void recycle_completed_request(struct impl *impl, struct port *port,
+		struct buffer *b, libcamera::Request *request)
+{
+	if (request == nullptr)
+		return;
+	request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+	if (impl == nullptr)
+		return;
+
+	/* Never queue a request whose ownership cannot be authenticated.  A
+	 * malformed cookie/pointer must terminate the stream rather than allowing
+	 * an arbitrary Request object back into libcamera's queue. */
+	if (port == nullptr || b == nullptr) {
+		mark_completion_failure(impl, -EPROTO);
+		return;
+	}
+
+	if (b->id >= port->n_buffers || b->id >= impl->requestPool.size() ||
+		impl->requestPool[b->id].get() != request) {
+		mark_completion_failure(impl, -EINVAL);
+		return;
+	}
+
+	/* Mark it outstanding before using the normal queue path so inactive and
+	 * queue-failure cases retain coherent ownership. */
+	SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
+	const int res = spa_libcamera_buffer_recycle(impl, port, b->id);
+	if (res < 0) {
+		mark_completion_failure(impl, res);
+		if (impl->log)
+			spa_log_warn(impl->log, "can't recycle malformed camera buffer %u: %s",
+				b->id, spa_strerror(res));
+	}
+}
+
 void handle_completed_request(struct impl *impl, libcamera::Request *request)
 {
+	if (request == nullptr)
+		return;
+	if (impl == nullptr) {
+		request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+		return;
+	}
+	if (!impl->active.load(std::memory_order_acquire)) {
+		request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+		return;
+	}
 	const auto request_id = request->cookie();
 	struct port *port = &impl->out_ports[0];
+	if (request_id >= MAX_BUFFERS || request_id >= port->n_buffers ||
+		request_id >= impl->requestPool.size() ||
+		impl->requestPool[request_id].get() != request) {
+		spa_log_warn(impl->log, "ignoring completion with invalid cookie %" PRIu64,
+				request_id);
+		/* Reuse releases libcamera's completed state, but the unauthenticated
+		 * request is deliberately not requeued.  The stream is terminal until
+		 * the owner performs a full stop/restart. */
+		request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+		mark_completion_failure(impl, -EPROTO);
+		return;
+	}
 	buffer *b = &port->buffers[request_id];
 
 	spa_log_trace(impl->log, "%p: request %p[%" PRIu64 "] process status:%u seq:%" PRIu32,
@@ -1211,32 +1628,53 @@ void handle_completed_request(struct impl *impl, libcamera::Request *request)
 	if (request->status() == libcamera::Request::Status::RequestCancelled) {
 		spa_log_trace(impl->log, "%p: request %p[%" PRIu64 "] cancelled",
 				impl, request, request_id);
-		request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
-		SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
-		spa_libcamera_buffer_recycle(impl, port, b->id);
+		recycle_completed_request(impl, port, b, request);
 		return;
 	}
 
-	const FrameBuffer *buffer = request->findBuffer(port->streamConfig.stream());
+	/* The caller-owned graph is authenticated once during allocation. Never
+	 * trust a changed count or data pointer in this asynchronous path. */
+	if (b->outbuf == nullptr || b->validated_datas == nullptr ||
+		b->validated_n_datas == 0 ||
+		b->outbuf->datas != b->validated_datas ||
+		b->outbuf->n_datas != b->validated_n_datas) {
+		spa_log_warn(impl->log, "camera buffer %" PRIu64 " changed its data graph",
+				request_id);
+		recycle_completed_request(impl, port, b, request);
+		return;
+	}
+
+	Stream *stream = port->streamConfig.stream();
+	if (stream == nullptr) {
+		spa_log_warn(impl->log, "%p: completion has no configured stream", request);
+		recycle_completed_request(impl, port, b, request);
+		return;
+	}
+	const FrameBuffer *buffer = request->findBuffer(stream);
 	if (buffer == nullptr) {
 		spa_log_warn(impl->log, "%p: request %p[%" PRIu64 "] has no buffer for stream %p",
-				impl, request, request_id, port->streamConfig.stream());
+				impl, request, request_id, stream);
+		recycle_completed_request(impl, port, b, request);
 		return;
 	}
 
 	const FrameMetadata &fmd = buffer->metadata();
 
 	if (impl->clock) {
-		double target = (double)port->info.rate.num / port->info.rate.denom;
+		const struct spa_fraction rate = framerate_valid(&port->rate)
+			? port->rate : defaultFramerate;
+		if (!framerate_valid(&port->info.rate))
+			port->info.rate = SPA_FRACTION(rate.num, rate.denom);
+		double target = (double)rate.num / rate.denom;
 		double corr;
 
 		if (impl->dll.bw == 0.0) {
-			spa_dll_set_bw(&impl->dll, SPA_DLL_BW_MAX, port->info.rate.denom, port->info.rate.denom);
+			spa_dll_set_bw(&impl->dll, SPA_DLL_BW_MAX, rate.denom, rate.denom);
 			impl->clock->next_nsec = fmd.timestamp;
 			corr = 1.0;
 		} else {
 			double diff = ((double)impl->clock->next_nsec - (double)fmd.timestamp) / SPA_NSEC_PER_SEC;
-			double error = port->info.rate.denom * (diff - target);
+			double error = rate.denom * (diff - target);
 			corr = spa_dll_update(&impl->dll, SPA_CLAMPD(error, -128., 128.));
 		}
 		/* FIXME, we should follow the driver clock and target_ values.
@@ -1264,31 +1702,56 @@ void handle_completed_request(struct impl *impl, libcamera::Request *request)
 		b->h->dts_offset = 0;
 	}
 
-	for (std::size_t i = 0; i < b->outbuf->n_datas; i++) {
-		auto *d = &b->outbuf->datas[i];
-
+	bool malformed = false;
+	for (uint32_t i = 0; i < b->validated_n_datas; i++) {
+		auto *d = &b->validated_datas[i];
+		if (d->chunk == nullptr) {
+			malformed = true;
+			continue;
+		}
 		d->chunk->flags = 0;
 
 		if (fmd.status != libcamera::FrameMetadata::Status::FrameSuccess)
 			d->chunk->flags |= SPA_CHUNK_FLAG_CORRUPTED;
 	}
+	if (malformed) {
+		spa_log_warn(impl->log, "completed camera buffer has a missing chunk");
+		recycle_completed_request(impl, port, b, request);
+		return;
+	}
+	if (b->queued) {
+		/* A duplicate completion would otherwise insert the same list node
+		 * twice and corrupt the PipeWire queue. */
+		spa_log_error(impl->log, "duplicate completion for camera buffer %" PRIu64,
+				request_id);
+		recycle_completed_request(impl, port, b, request);
+		mark_completion_failure(impl, -EALREADY);
+		return;
+	}
 
 	request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
 
 	spa_list_append(&port->queue, &b->link);
+	b->queued = true;
 
 	spa_io_buffers *io = port->io;
 	if (io == nullptr) {
 		b = spa_list_first(&port->queue, struct buffer, link);
 		spa_list_remove(&b->link);
+		b->queued = false;
+		spa_list_init(&b->link);
 		SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
-		spa_libcamera_buffer_recycle(impl, port, b->id);
+		if (spa_libcamera_buffer_recycle(impl, port, b->id) < 0)
+			mark_completion_failure(impl, -EIO);
 	} else if (io->status != SPA_STATUS_HAVE_DATA) {
-		if (io->buffer_id < port->n_buffers)
-			spa_libcamera_buffer_recycle(impl, port, io->buffer_id);
+		if (io->buffer_id < port->n_buffers &&
+			spa_libcamera_buffer_recycle(impl, port, io->buffer_id) < 0)
+			mark_completion_failure(impl, -EIO);
 
 		b = spa_list_first(&port->queue, struct buffer, link);
 		spa_list_remove(&b->link);
+		b->queued = false;
+		spa_list_init(&b->link);
 		SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
 
 		io->buffer_id = b->id;
@@ -1301,34 +1764,62 @@ void handle_completed_request(struct impl *impl, libcamera::Request *request)
 
 void libcamera_on_fd_events(struct spa_source *source)
 {
+	if (source == nullptr || source->data == nullptr)
+		return;
 	struct impl *impl = (struct impl*) source->data;
-	uint32_t index;
-	uint64_t cnt;
+	std::array<libcamera::Request *, COMPLETION_RING_SIZE> ready{};
+	std::size_t ready_count = 0;
+	bool remove_source = false;
 
-	if (source->rmask & SPA_IO_ERR) {
-		spa_log_error(impl->log, "libcamera %p: error %08x", impl, source->rmask);
-		if (impl->source.loop)
-			spa_loop_remove_source(impl->data_loop, &impl->source);
-		return;
+	{
+		std::lock_guard<std::mutex> guard(impl->completion_mutex);
+		if (impl->stopping || !impl->active.load(std::memory_order_acquire))
+			return;
+
+		if (source->rmask & SPA_IO_ERR) {
+			spa_log_error(impl->log, "libcamera %p: error %08x", impl, source->rmask);
+			mark_completion_failure(impl, -EIO);
+			remove_source = true;
+		} else if (!(source->rmask & SPA_IO_IN)) {
+			spa_log_warn(impl->log, "libcamera %p: spurious wakeup %d", impl, source->rmask);
+			return;
+		} else if (impl->system == nullptr || impl->source.fd < 0) {
+			mark_completion_failure(impl, -EIO);
+			remove_source = true;
+		} else {
+			uint64_t cnt = 0;
+			if (spa_system_eventfd_read(impl->system, impl->source.fd, &cnt) < 0) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK)
+					return;
+				spa_log_error(impl->log, "Failed to read on event fd");
+				mark_completion_failure(impl, -errno);
+				remove_source = true;
+			} else {
+				uint32_t index = 0;
+				const auto avail = spa_ringbuffer_get_read_index(
+					&impl->completed_requests_rb, &index);
+				if (avail < 0 || avail > COMPLETION_RING_SIZE) {
+					mark_completion_failure(impl, -EOVERFLOW);
+					remove_source = true;
+				} else {
+					for (int32_t left = avail; left > 0 &&
+						ready_count < ready.size(); --left, ++index) {
+						ready[ready_count++] =
+							impl->completed_requests[index & COMPLETION_RING_MASK];
+						impl->completed_requests[index & COMPLETION_RING_MASK] = nullptr;
+						spa_ringbuffer_read_update(&impl->completed_requests_rb, index + 1);
+					}
+				}
+			}
+		}
 	}
 
-	if (!(source->rmask & SPA_IO_IN)) {
-		spa_log_warn(impl->log, "libcamera %p: spurious wakeup %d", impl, source->rmask);
-		return;
-	}
+	for (std::size_t i = 0; i < ready_count; ++i)
+		handle_completed_request(impl, ready[i]);
 
-	if (spa_system_eventfd_read(impl->system, impl->source.fd, &cnt) < 0) {
-		spa_log_error(impl->log, "Failed to read on event fd");
-		return;
-	}
-
-	auto avail = spa_ringbuffer_get_read_index(&impl->completed_requests_rb, &index);
-	for (; avail > 0; avail--, index++) {
-		auto *request = impl->completed_requests[index & MASK_BUFFERS];
-
-		spa_ringbuffer_read_update(&impl->completed_requests_rb, index + 1);
-		handle_completed_request(impl, request);
-	}
+	if ((remove_source || impl->completion_error.load(std::memory_order_acquire) != 0) &&
+		impl->data_loop && impl->source.loop)
+		spa_loop_remove_source(impl->data_loop, &impl->source);
 }
 
 int spa_libcamera_use_buffers(struct impl *impl, struct port *port,
@@ -1362,13 +1853,23 @@ uint32_t libcamera_orientation_to_spa_transform_value(Orientation orientation)
 
 int
 spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
-		       struct spa_buffer **buffers,
-		       uint32_t n_buffers)
+			       struct spa_buffer **buffers,
+			       uint32_t n_buffers)
 {
+	if (impl == nullptr || port == nullptr || buffers == nullptr ||
+		n_buffers == 0 || n_buffers > MAX_BUFFERS)
+		return -EINVAL;
 	if (port->n_buffers > 0)
 		return -EIO;
+	if (!impl->config || impl->config->empty() || !impl->allocator.allocated())
+		return -EIO;
+	if (port->streamConfig.stride >
+		static_cast<unsigned int>(std::numeric_limits<int32_t>::max()))
+		return -EOVERFLOW;
 
 	Stream *stream = impl->config->at(0).stream();
+	if (stream == nullptr)
+		return -EIO;
 	const std::vector<std::unique_ptr<FrameBuffer>> &bufs =
 			impl->allocator.buffers(stream);
 
@@ -1376,7 +1877,9 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 		return -EINVAL;
 
 	const auto choose_memtype = [](uint32_t t) {
-		if (t != SPA_ID_INVALID && t & (1u << SPA_DATA_DmaBuf))
+		if (t == SPA_ID_INVALID)
+			return SPA_DATA_Invalid;
+		if (t & (1u << SPA_DATA_DmaBuf))
 			return SPA_DATA_DmaBuf;
 		if (t & (1u << SPA_DATA_MemFd))
 			return SPA_DATA_MemFd;
@@ -1384,18 +1887,70 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 		return SPA_DATA_Invalid;
 	};
 
+	/* Validate the complete graph before mutating any caller-owned SPA data. */
 	for (uint32_t i = 0; i < n_buffers; i++) {
-		struct buffer *b;
-
-		if (buffers[i]->n_datas < 1) {
-			spa_log_error(impl->log, "invalid buffer data");
+		if (!bufs[i]) {
+			spa_log_error(impl->log, "missing libcamera buffer at index %u", i);
+			return -EINVAL;
+		}
+		const auto& planes = bufs[i]->planes();
+		if (planes.empty()) {
+			spa_log_error(impl->log, "libcamera buffer %u has no planes", i);
 			return -EINVAL;
 		}
 
-		b = &port->buffers[i];
+		/* Every SPA data entry consumed below must have a corresponding
+		 * libcamera plane and a chunk.  Reject malformed negotiation input
+		 * before touching any entry; otherwise the fd assignment below can
+		 * index planes past its end when n_datas is larger than the plane
+		 * count. */
+		if (buffers[i] == nullptr || buffers[i]->datas == nullptr ||
+			buffers[i]->n_datas < 1 ||
+			buffers[i]->n_datas > planes.size()) {
+			spa_log_error(impl->log, "invalid buffer data");
+			return -EINVAL;
+		}
+		for (uint32_t j = 0; j < buffers[i]->n_datas; ++j) {
+			if (buffers[i]->datas[j].chunk == nullptr) {
+				spa_log_error(impl->log, "invalid buffer chunk at index %u/%u", i, j);
+				return -EINVAL;
+			}
+			if (choose_memtype(buffers[i]->datas[j].type) == SPA_DATA_Invalid) {
+				spa_log_error(impl->log, "can't use buffers of type %" PRIu32,
+						buffers[i]->datas[j].type);
+				return -EINVAL;
+			}
+		}
+		for (std::size_t j = 0; j < planes.size(); ++j) {
+			if (planes[j].fd.get() < 0 ||
+				planes[j].length > std::numeric_limits<uint32_t>::max() ||
+				planes[j].offset > std::numeric_limits<uint32_t>::max() -
+					planes[j].length) {
+				spa_log_error(impl->log, "invalid plane bounds at %u/%zu", i, j);
+				return -EOVERFLOW;
+			}
+			uint64_t total = 0;
+			for (std::size_t k = j; k < planes.size(); ++k) {
+				if (total > std::numeric_limits<uint64_t>::max() - planes[k].length)
+					return -EOVERFLOW;
+				total += planes[k].length;
+				if (total > std::numeric_limits<uint32_t>::max() ||
+					planes[j].offset > std::numeric_limits<uint32_t>::max() - total)
+					return -EOVERFLOW;
+			}
+		}
+	}
+
+	for (uint32_t i = 0; i < n_buffers; i++) {
+		struct buffer *b = &port->buffers[i];
+		const auto& planes = bufs[i]->planes();
+
 		b->id = i;
 		b->outbuf = buffers[i];
+		b->validated_datas = buffers[i]->datas;
+		b->validated_n_datas = buffers[i]->n_datas;
 		b->flags = 0;
+		b->queued = false;
 		b->h = (struct spa_meta_header*)spa_buffer_find_meta_data(buffers[i], SPA_META_Header, sizeof(*b->h));
 
 		b->videotransform = (struct spa_meta_videotransform*)spa_buffer_find_meta_data(
@@ -1406,16 +1961,10 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 				i, b->videotransform->transform);
 		}
 
-		const auto& planes = bufs[i]->planes();
 		spa_data *d = buffers[i]->datas;
 
 		for(uint32_t j = 0; j < buffers[i]->n_datas; ++j) {
 			const auto memtype = choose_memtype(d[j].type);
-			if (memtype == SPA_DATA_Invalid) {
-				spa_log_error(impl->log, "can't use buffers of type %" PRIu32, d[j].type);
-				return -EINVAL;
-			}
-
 			d[j].type = memtype;
 			d[j].flags = SPA_DATA_FLAG_READABLE;
 			d[j].fd = -1;
@@ -1432,22 +1981,16 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 					d[j].chunk->size = planes[j].length;
 				} else {
 					d[j].chunk->offset = planes[j].offset;
-					for (uint8_t k = j; k < numPlanes; k++) {
-						d[j].maxsize += planes[k].length;
-						d[j].chunk->size += planes[k].length;
-					}
+					uint64_t total = 0;
+					for (std::size_t k = j; k < numPlanes; k++)
+						total += planes[k].length;
+					d[j].maxsize = static_cast<uint32_t>(total);
+					d[j].chunk->size = static_cast<uint32_t>(total);
 				}
 			} else if (buffers[i]->n_datas == numPlanes) {
 				d[j].maxsize = planes[j].length;
 				d[j].chunk->offset = planes[j].offset;
 				d[j].chunk->size = planes[j].length;
-			} else {
-				spa_log_warn(impl->log, "buffer index: i: %d, data member "
-					"numbers: %d is greater than plane number: %d",
-					i, buffers[i]->n_datas, numPlanes);
-				d[j].maxsize = port->streamConfig.frameSize;
-				d[j].chunk->offset = 0;
-				d[j].chunk->size = port->streamConfig.frameSize;
 			}
 
 			switch (memtype) {
@@ -1473,25 +2016,57 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 
 void impl::requestComplete(libcamera::Request *request)
 {
-	struct impl *impl = this;
-	uint32_t index;
+	if (request == nullptr)
+		return;
 
-	spa_log_trace(impl->log, "%p: request %p[%" PRIu64 "] completed status:%u seq:%" PRIu32,
-			impl, request, request->cookie(),
+	std::lock_guard<std::mutex> lock(completion_mutex);
+	if (stopping || !active.load(std::memory_order_acquire) ||
+		system == nullptr || source.fd < 0)
+		return;
+
+	++callbacks_inflight;
+	struct callback_guard {
+		impl *self;
+		~callback_guard()
+		{
+			if (--self->callbacks_inflight == 0 && self->stopping)
+				self->completion_cv.notify_all();
+		}
+	} guard{this};
+
+	spa_log_trace(log, "%p: request %p[%" PRIu64 "] completed status:%u seq:%" PRIu32,
+			this, request, request->cookie(),
 			static_cast<unsigned int>(request->status()),
 			request->sequence());
 
-	spa_ringbuffer_get_write_index(&impl->completed_requests_rb, &index);
-	impl->completed_requests[index & MASK_BUFFERS] = request;
-	spa_ringbuffer_write_update(&impl->completed_requests_rb, index + 1);
+	uint32_t index = 0;
+	const int32_t used = spa_ringbuffer_get_write_index(&completed_requests_rb, &index);
+	if (used < 0 || used >= COMPLETION_RING_SIZE) {
+		spa_log_error(log, "completion ring overflow");
+		request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+		mark_completion_failure(this, -ENOSPC);
+		return;
+	}
+	completed_requests[index & COMPLETION_RING_MASK] = request;
+	spa_ringbuffer_write_update(&completed_requests_rb, index + 1);
 
-	if (spa_system_eventfd_write(impl->system, impl->source.fd, 1) < 0)
-		spa_log_error(impl->log, "Failed to write on event fd");
+	if (spa_system_eventfd_write(system, source.fd, 1) < 0) {
+		const int error = errno ? -errno : -EIO;
+		spa_log_error(log, "Failed to write on event fd: %s", spa_strerror(error));
+		/* Keep the slot owned by the ring.  Advancing the read index here would
+		 * discard older completions and leak their request ownership when the
+		 * stream transitions to its terminal error state.  stop() drains every
+		 * retained slot before resetting the ring. */
+		mark_completion_failure(this, error);
+	}
 
 }
 
 int spa_libcamera_stream_on(struct impl *impl)
 {
+	if (impl == nullptr || impl->camera == nullptr || impl->system == nullptr ||
+		impl->data_loop == nullptr)
+		return -EIO;
 	struct port *port = &impl->out_ports[0];
 	int res;
 
@@ -1500,15 +2075,18 @@ int spa_libcamera_stream_on(struct impl *impl)
 		return -EIO;
 	}
 
-	if (impl->active)
+	if (impl->active.load(std::memory_order_acquire))
 		return 0;
+	if (impl->requestPool.empty() || !impl->config || impl->config->empty())
+		return -EIO;
+	{
+		std::lock_guard<std::mutex> lock(impl->completion_mutex);
+		if (impl->stopping)
+			return -EBUSY;
+		impl->completion_error.store(0, std::memory_order_release);
+	}
 
 	spa_log_info(impl->log, "starting camera %s", impl->camera->id().c_str());
-	if ((res = impl->camera->start(&impl->initial_controls)) < 0)
-		return res == -EACCES ? -EBUSY : res;
-
-	impl->camera->requestCompleted.connect(impl, &impl::requestComplete);
-
 	res = spa_system_eventfd_create(impl->system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	if (res < 0)
 		goto err_stop;
@@ -1519,6 +2097,32 @@ int spa_libcamera_stream_on(struct impl *impl)
 	impl->source.mask = SPA_IO_IN | SPA_IO_ERR;
 	impl->source.rmask = 0;
 
+	/* Register the source before queueing requests so an immediately completed
+	 * request has a live wakeup target. */
+	res = spa_loop_invoke(
+		impl->data_loop,
+		[](spa_loop *, bool, uint32_t, const void *, size_t, void *user_data)
+		{
+			auto *impl = static_cast<struct impl *>(user_data);
+			return spa_loop_add_source(impl->data_loop, &impl->source);
+		},
+		0, nullptr, 0, true, impl
+	);
+	if (res < 0)
+		goto err_stop;
+	if (!impl->source.loop) {
+		res = -EIO;
+		goto err_stop;
+	}
+
+	if ((res = impl->camera->start(&impl->initial_controls)) < 0)
+		goto err_stop;
+	impl->camera_started = true;
+
+	impl->camera->requestCompleted.connect(impl, &impl::requestComplete);
+	impl->signal_connected = true;
+	impl->active.store(true, std::memory_order_release);
+
 	for (auto& req : impl->requestPool) {
 		req->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
 
@@ -1527,38 +2131,27 @@ int spa_libcamera_stream_on(struct impl *impl)
 	}
 
 	impl->dll.bw = 0.0;
-	impl->active = true;
-
-	res = spa_loop_locked(
-		impl->data_loop,
-		[](spa_loop *, bool, uint32_t, const void *, size_t, void *user_data)
-		{
-			auto *impl = static_cast<struct impl *>(user_data);
-			return spa_loop_add_source(impl->data_loop, &impl->source);
-		},
-		0, nullptr, 0, impl
-	);
-	if (res < 0)
-		goto err_stop;
 
 	return 0;
 
 err_stop:
-	impl->stop();
+	(void)impl->stop();
 
 	return res;
 }
 
 int spa_libcamera_stream_off(struct impl *impl)
 {
-	if (!impl->active)
+	if (impl == nullptr)
+		return -EINVAL;
+	if (!impl->active.load(std::memory_order_acquire) && !impl->camera_started &&
+		!impl->source.loop && impl->source.fd < 0)
 		return 0;
 
-	spa_log_info(impl->log, "stopping camera %s", impl->camera->id().c_str());
+	if (impl->camera)
+		spa_log_info(impl->log, "stopping camera %s", impl->camera->id().c_str());
 
-	impl->stop();
-
-	return 0;
+	return impl->stop();
 }
 
 int port_get_format(struct impl *impl, struct port *port,
@@ -1573,6 +2166,8 @@ int port_get_format(struct impl *impl, struct port *port,
 		return -EIO;
 	if (index > 0)
 		return 0;
+	const struct spa_fraction rate = framerate_valid(&port->rate)
+		? port->rate : defaultFramerate;
 
 	spa_pod_builder_push_object(builder, &f, SPA_TYPE_OBJECT_Format, SPA_PARAM_Format);
 	spa_pod_builder_add(builder,
@@ -1585,17 +2180,20 @@ int port_get_format(struct impl *impl, struct port *port,
 		spa_pod_builder_add(builder,
 			SPA_FORMAT_VIDEO_format,    SPA_POD_Id(port->current_format->info.raw.format),
 			SPA_FORMAT_VIDEO_size,      SPA_POD_Rectangle(&port->current_format->info.raw.size),
+			SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&rate),
 			0);
 		break;
 	case SPA_MEDIA_SUBTYPE_mjpg:
 	case SPA_MEDIA_SUBTYPE_jpeg:
 		spa_pod_builder_add(builder,
 			SPA_FORMAT_VIDEO_size,      SPA_POD_Rectangle(&port->current_format->info.mjpg.size),
+			SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&rate),
 			0);
 		break;
 	case SPA_MEDIA_SUBTYPE_h264:
 		spa_pod_builder_add(builder,
 			SPA_FORMAT_VIDEO_size,      SPA_POD_Rectangle(&port->current_format->info.h264.size),
+			SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&rate),
 			0);
 		break;
 	default:
@@ -1721,11 +2319,15 @@ int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 
 	switch (id) {
 	case SPA_IO_Clock:
+		if (data != nullptr && size < sizeof(struct spa_io_clock))
+			return -ENOSPC;
 		impl->clock = (struct spa_io_clock*)data;
 		if (impl->clock)
 			SPA_FLAG_SET(impl->clock->flags, SPA_IO_CLOCK_FLAG_NO_RATE);
 		break;
 	case SPA_IO_Position:
+		if (data != nullptr && size < sizeof(struct spa_io_position))
+			return -ENOSPC;
 		impl->position = (struct spa_io_position*)data;
 		break;
 	default:
@@ -1994,16 +2596,25 @@ int port_set_format(struct impl *impl, struct port *port,
 {
 	const bool try_only = SPA_FLAG_IS_SET(flags, SPA_NODE_PARAM_FLAG_TEST_ONLY);
 
-	if (!try_only) {
-		spa_libcamera_stream_off(impl);
-		spa_libcamera_clear_buffers(port);
-		freeBuffers(impl, port);
-		port->current_format.reset();
-	}
-
 	if (format == nullptr) {
-		if (!try_only)
-			spa_libcamera_close(impl);
+		if (try_only)
+			return 0;
+		const int stop_res = spa_libcamera_stream_off(impl);
+		if (stop_res < 0)
+			return stop_res;
+		if (port->n_buffers > 0) {
+			const int clear_res = spa_libcamera_clear_buffers(port);
+			if (clear_res < 0)
+				return clear_res;
+		}
+		const int free_res = freeBuffers(impl, port);
+		if (free_res < 0)
+			return free_res;
+		port->current_format.reset();
+		impl->config.reset();
+		const int close_res = spa_libcamera_close(impl);
+		if (close_res < 0)
+			return close_res;
 	} else {
 		spa_video_info info;
 		int res;
@@ -2109,7 +2720,8 @@ int impl_node_port_use_buffers(void *object,
 	port = GET_PORT(impl, direction, port_id);
 
 	if (port->n_buffers) {
-		spa_libcamera_stream_off(impl);
+		if ((res = spa_libcamera_stream_off(impl)) < 0)
+			return res;
 		if ((res = spa_libcamera_clear_buffers(port)) < 0)
 			return res;
 	}
@@ -2144,11 +2756,15 @@ int impl_node_port_set_io(void *object,
 
 	switch (id) {
 	case SPA_IO_Buffers:
+		if (data != nullptr && size < sizeof(struct spa_io_buffers))
+			return -ENOSPC;
 		port->io = (struct spa_io_buffers*)data;
 		break;
 	case SPA_IO_Control:
+		if (data != nullptr && size < sizeof(struct spa_io_sequence))
+			return -ENOSPC;
 		port->control = (struct spa_io_sequence*)data;
-		port->control_size = size;
+		port->control_size = data != nullptr ? size : 0;
 		break;
 	default:
 		return -ENOENT;
@@ -2234,8 +2850,13 @@ int impl_node_process(void *object)
 	if ((io = port->io) == nullptr)
 		return -EIO;
 
-	if (port->control)
-		process_control(impl, &port->control->sequence, port->control_size);
+	if (port->control) {
+		if (port->control_size < sizeof(struct spa_io_sequence))
+			return -EINVAL;
+		if ((res = process_control(impl, &port->control->sequence,
+				port->control_size)) < 0)
+			return res;
+	}
 
 	spa_log_trace(impl->log, "%p: status %d", impl, io->status);
 
@@ -2302,7 +2923,29 @@ int impl_get_interface(struct spa_handle *handle, const char *type, void **inter
 
 int impl_clear(struct spa_handle *handle)
 {
-	std::destroy_at(reinterpret_cast<impl *>(handle));
+	if (handle == nullptr)
+		return -EINVAL;
+	auto *impl = reinterpret_cast<struct impl *>(handle);
+	const int stop_res = impl->stop();
+	if (stop_res < 0)
+		return stop_res;
+	struct port *port = &impl->out_ports[0];
+	if (port->n_buffers > 0) {
+		const int clear_res = spa_libcamera_clear_buffers(port);
+		if (clear_res < 0)
+			return clear_res;
+	}
+	if (!impl->requestPool.empty() || impl->allocator.allocated()) {
+		const int free_res = freeBuffers(impl, port);
+		if (free_res < 0)
+			return free_res;
+	}
+	port->current_format.reset();
+	impl->config.reset();
+	const int close_res = spa_libcamera_close(impl);
+	if (close_res < 0)
+		return close_res;
+	std::destroy_at(impl);
 	return 0;
 }
 
@@ -2320,6 +2963,7 @@ impl::impl(spa_log *log, spa_loop *data_loop, spa_system *system,
 	  allocator(this->camera)
 {
 	libcamera_log_topic_init(log);
+	source.fd = -1;
 
 	spa_hook_list_init(&hooks);
 
