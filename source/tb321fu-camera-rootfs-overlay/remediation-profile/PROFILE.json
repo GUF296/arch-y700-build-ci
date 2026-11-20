@@ -1,0 +1,62 @@
+{
+  "archive_bytes": 733964,
+  "archive_sha256": "4c0584e9c5ad22974c046e1e3ba686a340e657ace0a2b3e97cc07b3bdac40d97",
+  "baseline_manifest_sha256": "ac1a870b55907d8167cfaacb714950c519c38a21bdf9d5ab182b47fb80c754b3",
+  "epoch": 1780486138,
+  "package_sha256": "421cb952bbbe35b8b16d13c73577fecc71d00bd63834d9df26ab55228c77eac3",
+  "package_version": "20260929.3",
+  "producer_provenance_sha256": "283bed6c760ccede16411180ff804a69ac429c61d8c7456e67fe15cdfd2ba6d7",
+  "producer_report_sha256": "f4493ce98f610c35bc5aadf92597f3d0d15f95426ed210baac9c9b3fdf617d3a",
+  "producer_source": {
+    "git_head": "a3fb066b051f6bbb98d11434fc1e5536c37341bf",
+    "inputs_sha256": "6d650ba53d5bdbb3a2556ef40b4a7740b9134ff8c4331090643341a818f0867b",
+    "kind": "immutable-git-commit",
+    "package_builder_sha256": "c21cd35e2bee7aeb1439024a6831c23e4120f8cc38a8db899f29a8748302f6ad",
+    "spa_producer_manifest_sha256": "13f90e69d15306599f84677ddfb15ea06e290d0bda8a7cbd03e0b43dfb2ff46f",
+    "spa_source_sha256": "47d8fa3b5e1d5c9e72cd4e65f4666344f17f22dfa3536471ffa9a876d498d2b8",
+    "spa_toolchain_sha256": "4b1ebbc0f2bbcbf95e75b3d527d4225cc0512e522766ed25481d256146b444b3"
+  },
+  "replacements": {
+    "opt/libcamera-y700/bin/cam": {
+      "mode": "0755",
+      "sha256": "80736b69e8ffa06f96972fd2860bccafd2eac044cefdb9ea62b14dbb5fffaabe",
+      "size": 264352
+    },
+    "opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so": {
+      "mode": "0644",
+      "sha256": "00de6141eed6c333f8ce40df27c97748897d64e6fd12058712dc643875cf3ad8",
+      "size": 201728
+    },
+    "opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7.1": {
+      "mode": "0644",
+      "sha256": "42000351ac17046479ef5bf51d92d986029e02a7164a4ee68306aed0b7452cfa",
+      "size": 200824
+    },
+    "opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7.1": {
+      "mode": "0644",
+      "sha256": "611b4782136389528e37a6705d6fae7eb285848c09da276bf030e547f4c34fcc",
+      "size": 1785760
+    },
+    "opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa/ipa_soft_simple.so": {
+      "mode": "0644",
+      "sha256": "e49f2d9ac1659379d4501cfcb4666ff363e9e64dda7acae6b9fe619a0e3b183d",
+      "size": 265288
+    },
+    "opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa/ipa_soft_simple.so.sign": {
+      "mode": "0644",
+      "sha256": "020d6ede7cb69da758656e3b251b6ad0b6944cdd6715515edaf98fefb9f6c513",
+      "size": 256
+    },
+    "opt/libcamera-y700/libexec/libcamera/soft_ipa_proxy": {
+      "mode": "0755",
+      "sha256": "72eb3de3ad7c5afce62f52a5165fd591ca39e44b492525ce548fe388f6003f8b",
+      "size": 67664
+    },
+    "usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so": {
+      "mode": "0644",
+      "sha256": "227e5a6f8d3fb2d302141754342cb1c728decc7a2f40210e7ea6c0805edc9c2f",
+      "size": 200032
+    }
+  },
+  "schema": "tb321fu-camera-remediation-profile-v1"
+}

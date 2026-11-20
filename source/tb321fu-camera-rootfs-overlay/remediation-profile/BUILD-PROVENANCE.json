@@ -1,0 +1,56 @@
+{
+  "inputs": {
+    "LIBCAMERA-BUILD-ENVIRONMENT.json": "71e7e3b55d163ed69ab0b15191340fcf1c42886e6cfdcfa4f3bb73c1a0e37b3b",
+    "LIBCAMERA-RUNTIME-REFERENCE.tsv": "f63ceb8b1fd86ebe8041c7b134c16305dfb259856694a0a597577eede16b9942",
+    "adapt-libcamera-build.py": "1929149ac62f4abd0243472c03cea03f2cd50fe7fc2f4afef8ba531e4249ab18",
+    "build-tb321fu-libcamera-runtime.py": "bc9dd738825b5ca78653edbf58a87814408272dbabe47ed9837810b3c5431470",
+    "export-libcamera-source.py": "74889730c02305922e6c33e8d9b059736c4d5b4f280518cb3b10c6f506336277",
+    "libcamera-aarch64.cross": "661faed3b536be8b8d845840cad2300e910b1a82f2d739661386b7c035cdde38",
+    "materialize-libcamera-source.py": "30b78e8b41c78ef6938603705ffdd1c100d375107c4fde6bb86f19cb58ce5aec",
+    "safe-extract-archive.py": "2d3c59d638a8058d7478f47b6c18d852352b9f25396abb660c81ea4906a480ab",
+    "test-libcamera-ipa-isolation.py": "7770aacd63cf4425b32c85340f5dd04d5f9821d953e30d337e6d5491f7ca3e01",
+    "verify-camera-overlay.py": "e0853326bcb9858e2fec15497a8bf48cfaa1c957122e6d24f99dfe45671e8585",
+    "verify-libcamera-build-environment.py": "ddc19a8603bf816db1fe3a8b2e2a5d27dd5d8bb260e0489f0713aa4c9c193bbf",
+    "verify-libcamera-runtime.py": "672e8e1fcf8b620181a619c2b6fcda372c60a6abd2af77a506743142e0920dc2"
+  },
+  "options": [
+    "--prefix=/opt/libcamera-y700",
+    "--libdir=lib/aarch64-linux-gnu",
+    "--buildtype=debugoptimized",
+    "--wrap-mode=nodownload",
+    "-Dpipelines=simple",
+    "-Dipas=simple",
+    "-Dcam=enabled",
+    "-Dqcam=disabled",
+    "-Dgstreamer=enabled",
+    "-Dv4l2=disabled",
+    "-Dtest=false",
+    "-Dlc-compliance=disabled",
+    "-Ddocumentation=disabled",
+    "-Dtracing=disabled",
+    "-Dpycamera=disabled",
+    "-Dcam-jpeg=disabled",
+    "-Dcam-output-kms=disabled",
+    "-Dcam-output-sdl2=disabled",
+    "-Dsoftisp-gpu=enabled",
+    "-Dapps-output-dng=disabled",
+    "-Dipa-force-isolation=true"
+  ],
+  "public_key_der_base64": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2p187q2yrF/KgIhMxVu4LenT2I8jHYA+zZpOePVCGmMDsCFpfItp45cscZMwj9QqiX6bWs7A8Xq/SZcoLxRfeUu3zFl5SmV7wr3qrY0KPfM/6119sOi66H3m24gQ0rqXCmLyCnnU4p+XhZOuagisbfTwc8UDASFp2bE4a9YURCDXfO2oAeCJpczrkO7niqsWoI9ljM2gh02OUfgpe1zHLXhzvBsRaOoDe4E3xYT3jOTc75mfd6zQNZm0FWVYDyxET88qgy7hQeDgdcVBsWnFVG4hht/3UQfXm5gP8KLU5GAT4uHEcni/8L3SCdRHXGDB2l4zQvbiE6mFLHv/ii69+QIDAQAB",
+  "public_key_sha256": "9fcccdeba757d01027bc1c69be1b9d8bb28977bdf28e1ee2e27ec88d1384fb0a",
+  "replica_manifests": [
+    "f55e74d84bbc07a353b5aef2c8ec8b65c02cbda5eb2c14280fe14859c8bb4e30",
+    "f55e74d84bbc07a353b5aef2c8ec8b65c02cbda5eb2c14280fe14859c8bb4e30"
+  ],
+  "runtime_manifest_sha256": "f55e74d84bbc07a353b5aef2c8ec8b65c02cbda5eb2c14280fe14859c8bb4e30",
+  "schema": "tb321fu-libcamera-runtime-v1",
+  "source": {
+    "archive_sha256": "5329c1c4241f3b84cc82658d412f658f7ec8b784f2da63e6742f62880397cd3d",
+    "derived_manifest_sha256": "484eb6692d052ae97a2f1fb9fccf04b91a81fcd837762c41a313403b02345534",
+    "epoch": 1780486138,
+    "lock_sha256": "cee226687407f25f06b4852dde611326513cacee78277cb54cf3003e39d8d48b",
+    "manifest_sha256": "ab0e834f4e861c0fd609d508b4cee4964e1be6c5370feb6d767714ca19ba9161",
+    "tree_sha256": "328f60d3a36125a8e17be8ef93ae49836eae95b5991ba81e0239fdb1c9556668",
+    "version": "0.7.1+tb321fu.328f60d3a36125a8.p1929149ac62f4abd"
+  }
+}

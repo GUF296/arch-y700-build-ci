@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,34 @@ def validate_release_staging(run: str) -> None:
         fail("release staging reuses the directory-qualified artifact manifest")
 
 
+def validate_camera_validation(run: str) -> None:
+    commands = []
+    for line in run.replace("\\\n", " " ).splitlines():
+        try:
+            tokens = tuple(shlex.split(line, comments=True))
+        except ValueError as error:
+            fail(f"invalid validation shell framing: {error}")
+        if not tokens:
+            continue
+        if tokens[0] not in {"set", "export", "bash", "python3"}:
+            fail("validation must be an unconditional command sequence")
+        commands.append(tokens)
+    required = (
+        ("set", "-euo", "pipefail"),
+        ("export", "PYTHONDONTWRITEBYTECODE=1"),
+        ("python3", "-B", "scripts/ci/test-camera-overlay-verifier.py"),
+        ("bash", "scripts/ci/test-camera-overlay-installer.sh"),
+        ("python3", "-B", "scripts/ci/test-camera-remediation-profile.py"),
+        ("python3", "-B", "scripts/ci/test-camera-profile-import.py"),
+        ("bash", "scripts/ci/test-arch-camera-remediation.sh"),
+        ("python3", "-B", "scripts/ci/test-camera-source-contract.py", "source/tb321fu-camera-rootfs-overlay/source/libcamera-source.cpp.clean-minimal-daily"),
+        ("python3", "-B", "scripts/ci/test-camera-data-loop.py", "source/tb321fu-camera-rootfs-overlay/source/libcamera-source.cpp.clean-minimal-daily"),
+    )
+    for command in required:
+        if commands.count(command) != 1:
+            fail(f"validation must execute its camera contract exactly once: {command}")
+
+
 def validate_structure(workflow: pathlib.Path, data: dict) -> None:
     dispatch = require_mapping(
         require_mapping(data.get("on"), "on").get("workflow_dispatch"),
@@ -101,6 +130,23 @@ def validate_structure(workflow: pathlib.Path, data: dict) -> None:
     steps = build.get("steps")
     if not isinstance(steps, list) or not steps:
         fail("jobs.build.steps must be a non-empty list")
+    validation = [(i, step) for i, step in enumerate(steps)
+                  if isinstance(step, dict) and step.get("name") ==
+                  "Validate workflow input boundaries"]
+    dependencies = [(i, step) for i, step in enumerate(steps)
+                    if isinstance(step, dict) and step.get("name") ==
+                    "Install validation dependencies"]
+    if len(validation) != 1 or len(dependencies) != 1:
+        fail("workflow must declare one validation step and one dependency step")
+    if dependencies[0][0] >= validation[0][0]:
+        fail("validation dependencies must precede their first use")
+    dependency_run = dependencies[0][1].get("run", "")
+    if "sudo apt-get install -y python3-yaml" not in dependency_run:
+        fail("validation must explicitly install its PyYAML dependency")
+    validation_run = validation[0][1].get("run")
+    if not isinstance(validation_run, str):
+        fail("validation step has no shell body")
+    validate_camera_validation(validation_run)
 
     checkout_seen = False
     rootfs_step = None
@@ -171,6 +217,12 @@ def validate_rootfs_contract(rootfs: pathlib.Path) -> None:
         "DEFAULT_USER_PASSWORD_HASH=${DEFAULT_USER_PASSWORD_HASH:-!}",
         "ROOT_PASSWORD_MODE=${ROOT_PASSWORD_MODE:-locked}",
         "ROOT_PASSWORD_HASH=${ROOT_PASSWORD_HASH:-}",
+        'camera_stack_source_kind=repository-remediation',
+        'python3 -I -B "$SCRIPT_DIR/camera-remediation-profile.py" --output "$stage"',
+        'python3 -I -B "$SCRIPT_DIR/camera-remediation-profile.py" --verify-tree "$stage"',
+        'camera_stack_profile_sha256=${camera_stack_profile_sha256:-}',
+        'camera_stack_producer_package_sha256=${camera_stack_producer_package_sha256:-}',
+        '  verify_tb321fu_camera_loader',
     )
     for token in required:
         if token not in text:
@@ -337,6 +389,31 @@ def self_test() -> None:
         pass
     else:
         fail("self-test accepted reuse of the directory-qualified artifact manifest")
+    camera_validation = "\n".join((
+        "set -euo pipefail",
+        "export PYTHONDONTWRITEBYTECODE=1",
+        "python3 -B scripts/ci/test-camera-overlay-verifier.py",
+        "bash scripts/ci/test-camera-overlay-installer.sh",
+        "python3 -B scripts/ci/test-camera-remediation-profile.py",
+        "python3 -B scripts/ci/test-camera-profile-import.py",
+        "bash scripts/ci/test-arch-camera-remediation.sh",
+        "python3 -B scripts/ci/test-camera-source-contract.py source/tb321fu-camera-rootfs-overlay/source/libcamera-source.cpp.clean-minimal-daily",
+        "python3 -B scripts/ci/test-camera-data-loop.py source/tb321fu-camera-rootfs-overlay/source/libcamera-source.cpp.clean-minimal-daily",
+    ))
+    validate_camera_validation(camera_validation)
+    gate = "bash scripts/ci/test-camera-overlay-installer.sh"
+    for invalid in (
+        camera_validation.replace(gate, "# " + gate),
+        camera_validation.replace(gate, gate + " || true"),
+        camera_validation.replace(gate, gate + "\n" + gate),
+        "if false; then\n" + camera_validation + "\nfi",
+        camera_validation.replace("set -euo pipefail", ""),
+    ):
+        try:
+            validate_camera_validation(invalid)
+        except SystemExit:
+            continue
+        fail("self-test accepted a bypassed camera validation gate")
     print("workflow semantic self-test: PASS")
 
 

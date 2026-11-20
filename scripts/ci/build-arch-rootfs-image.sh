@@ -1889,9 +1889,14 @@ validate_camera_stack_stage() {
 }
 
 apply_tb321fu_camera_stack() {
-  local source_root archive extract stage
+  local source_root archive extract stage profile_receipt
+  camera_stack_source_kind=baseline-override
+  camera_stack_profile_sha256=
+  camera_stack_producer_package_sha256=
+  camera_stack_producer_source_kind=
   local -a camera_dependencies=(
     glibc gcc-libs libdrm libyaml gnutls libunwind libcamera
+    libelf libevent libglvnd glib2 systemd-libs
     gstreamer gst-plugins-base-libs pipewire
   )
   local -a camera_provides=(gst-plugin-libcamera y700-camera-stack)
@@ -1909,6 +1914,7 @@ apply_tb321fu_camera_stack() {
     source_root=$(find_camera_source_root "$CAMERA_STACK_DIR") || ci_die "CAMERA_STACK_DIR does not contain verified camera stack"
   elif [ -d "$REPO_ROOT/source/tb321fu-camera-rootfs-overlay" ]; then
     source_root=$(find_camera_source_root "$REPO_ROOT/source/tb321fu-camera-rootfs-overlay") || ci_die "repository camera stack overlay is incomplete"
+    camera_stack_source_kind=repository-remediation
   else
     ci_die "set CAMERA_STACK_ARCHIVE/CAMERA_STACK_DIR or add source/tb321fu-camera-rootfs-overlay"
   fi
@@ -1916,9 +1922,24 @@ apply_tb321fu_camera_stack() {
   ci_log "applying TB321FU camera stack: $source_root"
   stage="$work_dir/camera-stack-stage"
   rm -rf "$stage"
-  mkdir -p "$stage"
-  rsync -aH --numeric-ids "$source_root"/ "$stage"/
-  validate_camera_stack_stage "$stage"
+  if [ "$camera_stack_source_kind" = repository-remediation ]; then
+    profile_receipt="$work_dir/camera-profile-receipt.txt"
+    python3 -I -B "$SCRIPT_DIR/camera-remediation-profile.py" --output "$stage" >"$profile_receipt"
+    camera_stack_profile_sha256=$(awk -F= '$1 == "camera_profile_sha256" {print $2}' "$profile_receipt")
+    camera_stack_producer_package_sha256=$(awk -F= '$1 == "camera_source_package_sha256" {print $2}' "$profile_receipt")
+    camera_stack_producer_source_kind=$(awk -F= '$1 == "camera_producer_source_kind" {print $2}' "$profile_receipt")
+    [[ $camera_stack_profile_sha256 =~ ^[0-9a-f]{64}$ &&
+       $camera_stack_producer_package_sha256 =~ ^[0-9a-f]{64}$ ]] || ci_die "invalid camera remediation receipt"
+    case "$camera_stack_producer_source_kind" in
+      working-tree-snapshot|immutable-git-commit) ;;
+      *) ci_die "invalid camera source identity in remediation receipt" ;;
+    esac
+    python3 -I -B "$SCRIPT_DIR/camera-remediation-profile.py" --verify-tree "$stage"
+  else
+    mkdir -p "$stage"
+    rsync -aH --numeric-ids "$source_root"/ "$stage"/
+    validate_camera_stack_stage "$stage"
+  fi
   if [ -d "$arch_camera_supplement_stage" ]; then
     local supplement_relative supplement_source supplement_target
     for supplement_relative in \
@@ -2217,6 +2238,32 @@ GPU_DROPIN
   ) || ci_die "TB321FU GPU package checksum mismatch"
 }
 
+verify_tb321fu_camera_loader() {
+  local object trace
+  local -a objects=(
+    /opt/libcamera-y700/bin/cam
+    /opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7.1
+    /opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7.1
+    /opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa/ipa_soft_simple.so
+    /opt/libcamera-y700/libexec/libcamera/soft_ipa_proxy
+    /usr/lib/gstreamer-1.0/libgstlibcamera.so
+    /usr/lib/spa-0.2/libcamera/libspa-libcamera.so
+  )
+  for object in "${objects[@]}"; do
+    trace=$(arch_chroot /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+      /lib/ld-linux-aarch64.so.1 --list --library-path \
+      /opt/libcamera-y700/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu:/usr/lib "$object" 2>&1) ||
+      ci_die "Arch target loader rejected $object: $trace"
+    [[ $trace != *'not found'* && $trace == *'=>'* ]] ||
+      ci_die "Arch target loader reported unresolved camera libraries: $object"
+    awk '$1 ~ /^libcamera(-base)?[.]so[.]0[.]7$/ && $2 == "=>" &&
+         $3 !~ /^\/opt\/libcamera-y700\/lib\/aarch64-linux-gnu\// {bad=1}
+         END {exit bad}' <<<"$trace" ||
+      ci_die "Arch target loader selected a noncandidate libcamera dependency: $object"
+  done
+  ci_log "Arch camera target-loader checks passed for ${#objects[@]} ELF objects (no camera application started)"
+}
+
 verify_tb321fu_native_package_integrity() {
   local package path owner stock_owner
   local -a packages=(tb321fu-camera-stack)
@@ -2256,6 +2303,7 @@ verify_tb321fu_native_package_integrity() {
     [ "$owner" = tb321fu-camera-stack ] || \
       ci_die "camera payload has wrong pacman owner $owner: $path"
   done
+  verify_tb321fu_camera_loader
   if ci_bool "$BUILD_TB321FU_GPU_SENSOR"; then
     for path in "${gpu_paths[@]}"; do
       owner=$(arch_chroot /usr/bin/pacman -Qoq "$path") || \
@@ -2794,6 +2842,10 @@ haptics_deb_archive=${HAPTICS_DEB_ARCHIVE:-}
 haptics_deb_dir=${HAPTICS_DEB_DIR:-}
 camera_stack_archive=${CAMERA_STACK_ARCHIVE:-}
 camera_stack_dir=${CAMERA_STACK_DIR:-}
+camera_stack_source_kind=${camera_stack_source_kind:-}
+camera_stack_profile_sha256=${camera_stack_profile_sha256:-}
+camera_stack_producer_package_sha256=${camera_stack_producer_package_sha256:-}
+camera_stack_producer_source_kind=${camera_stack_producer_source_kind:-}
 build_tb321fu_gpu_sensor=$BUILD_TB321FU_GPU_SENSOR
 tb321fu_gpu_sensor_source_archive=${TB321FU_GPU_SENSOR_SOURCE_ARCHIVE:-}
 tb321fu_gpu_sensor_source_dir=${TB321FU_GPU_SENSOR_SOURCE_DIR:-repo-default}

@@ -243,6 +243,24 @@ def main() -> None:
         ).is_symlink():
             raise SystemExit("ZIP symlink target escaped through a pre-existing symlink")
 
+        # Validate the complete in-archive link graph before writing links.  A
+        # forward edge can become escaping only after another archive member is
+        # installed: B -> A/../outside followed by A -> . must be rejected.
+        graph_escape = root / "graph-escape.zip"
+        with zipfile.ZipFile(graph_escape, "w") as archive:
+            for name, target in (("B", "A/../outside"), ("A", ".")):
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.external_attr = (0o120777 << 16)
+                archive.writestr(info, target)
+        graph_destination = root / "graph-escape-out"
+        require_rejected(
+            run(helper, graph_escape, graph_destination),
+            "forward ZIP symlink graph escape",
+        )
+        if (graph_destination / "A").exists() or (graph_destination / "A").is_symlink():
+            raise SystemExit("graph escape fixture wrote links before graph validation")
+
         outside_alias = root / "outside-alias.txt"
         outside_alias.write_text("outside must remain unchanged\n")
         zip_alias_out = root / "zip-alias-out"

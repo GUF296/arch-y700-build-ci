@@ -148,16 +148,9 @@ esac
 
 camera_source=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)/source/tb321fu-camera-rootfs-overlay/source/libcamera-source.cpp.clean-minimal-daily
 if [ -f "$camera_source" ]; then
-  grep -Fq 'struct spa_fraction rate = { 30, 1 };' "$camera_source"
-  grep -Fq 'buffers[i]->n_datas > planes.size()' "$camera_source"
-  grep -Fq 'buffers[i]->datas[j].chunk == nullptr' "$camera_source"
-  grep -Fq 'd[j].fd = planes[j].fd.get();' "$camera_source"
-  grep -Fq 'size < sizeof(struct spa_io_sequence)' "$camera_source"
-  grep -Fq 'if ((res = process_control' "$camera_source"
-  if grep -Fq 'numbers: %d is greater than plane number' "$camera_source"; then
-    echo 'camera source still contains the unsafe extra-data fallback' >&2
-    exit 1
-  fi
+  # Use the complete canonical contract, including reciprocal frame periods,
+  # bounded buffer graphs and control records, rather than stale snippets.
+  python3 -B "$SCRIPT_DIR/test-camera-source-contract.py" "$camera_source"
 fi
 
 unmount_line=$(grep -n '^unmount_chroot_runtime$' "$rootfs_script" | tail -n1 | cut -d: -f1)

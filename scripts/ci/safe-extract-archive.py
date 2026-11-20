@@ -644,6 +644,49 @@ def validate_zip_directory_budget(handle, archive_size: int) -> None:
     )
 
 
+def validate_zip_link_graph(
+    entries: list[tuple[zipfile.ZipInfo, PurePosixPath, str | None]],
+) -> None:
+    """Validate every ZIP link after resolving links supplied by the archive."""
+
+    links: dict[tuple[str, ...], tuple[str, ...]] = {
+        tuple(name.parts): tuple(PurePosixPath(link_target).parts)
+        for _info, name, link_target in entries
+        if link_target is not None
+    }
+
+    def resolve(parts: tuple[str, ...], description: str) -> tuple[str, ...]:
+        stack: list[str] = []
+        pending = list(parts)
+        follows = 0
+        while pending:
+            part = pending.pop(0)
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not stack:
+                    raise ValueError(f"ZIP link graph escapes destination root: {description}")
+                stack.pop()
+                continue
+            stack.append(part)
+            target = links.get(tuple(stack))
+            if target is None:
+                continue
+            follows += 1
+            if follows > MAX_PATH_COMPONENTS:
+                raise ValueError(f"ZIP link graph contains a cycle: {description}")
+            stack.pop()
+            pending[0:0] = list(target)
+        return tuple(stack)
+
+    for _info, name, link_target in entries:
+        if link_target is None:
+            continue
+        parent = tuple(name.parent.parts)
+        resolve(parent, f"{name} parent")
+        resolve(parent + tuple(PurePosixPath(link_target).parts), f"{name} -> {link_target}")
+
+
 def extract_zip(archive_file, archive_bytes: int, destination: Path) -> int:
     validate_zip_directory_budget(archive_file, archive_bytes)
     archive_file.seek(0)
@@ -685,6 +728,7 @@ def extract_zip(archive_file, archive_bytes: int, destination: Path) -> int:
             if len(entries) > MAX_MEMBERS:
                 raise ValueError("ZIP archive has too many members")
 
+        validate_zip_link_graph(entries)
         validate_resource_budget(archive_bytes, destination, len(entries), total_bytes)
         reject_preexisting_target_aliases(
             destination,

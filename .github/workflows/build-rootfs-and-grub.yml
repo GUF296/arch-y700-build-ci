@@ -73,8 +73,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install validation dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml g++ openssl
+
       - name: Validate workflow input boundaries
         run: |
+          set -euo pipefail
+          export PYTHONDONTWRITEBYTECODE=1
           bash scripts/ci/run-actionlint.sh .github/workflows/build-rootfs-and-grub.yml
           python3 scripts/ci/test-workflow-semantics.py --self-test
           python3 scripts/ci/test-workflow-semantics.py \
@@ -88,6 +96,13 @@ jobs:
           python3 scripts/ci/check-service-enable-policy.py --self-test
           python3 scripts/ci/check-service-enable-policy.py scripts/ci/build-arch-rootfs-image.sh
           python3 scripts/ci/test-safe-extract-archive.py
+          python3 -B scripts/ci/test-camera-overlay-verifier.py
+          bash scripts/ci/test-camera-overlay-installer.sh
+          python3 -B scripts/ci/test-camera-remediation-profile.py
+          python3 -B scripts/ci/test-camera-profile-import.py
+          bash scripts/ci/test-arch-camera-remediation.sh
+          python3 -B scripts/ci/test-camera-source-contract.py source/tb321fu-camera-rootfs-overlay/source/libcamera-source.cpp.clean-minimal-daily
+          python3 -B scripts/ci/test-camera-data-loop.py source/tb321fu-camera-rootfs-overlay/source/libcamera-source.cpp.clean-minimal-daily
           python3 scripts/ci/test-imported-deb-boundaries.py
           bash scripts/ci/test-arch-import-boundaries.sh
           bash scripts/ci/test-proxy-boundaries.sh

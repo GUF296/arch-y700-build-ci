@@ -1,0 +1,216 @@
+TB321FU_CAMERA_STACK_DEB_BUILD=PASS
+version=20260929.3
+arch=arm64
+camera_input_kind=repository
+deb=tb321fu-camera-stack_20260929.3_arm64.deb
+camera_source_sha256=47d8fa3b5e1d5c9e72cd4e65f4666344f17f22dfa3536471ffa9a876d498d2b8
+camera_producer_manifest_sha256=13f90e69d15306599f84677ddfb15ea06e290d0bda8a7cbd03e0b43dfb2ff46f
+camera_toolchain_sha256=4b1ebbc0f2bbcbf95e75b3d527d4225cc0512e522766ed25481d256146b444b3
+camera_link_build_id=2cc9f50f0051389a40c7dd05ac04f841dcc268aa
+camera_overlay_manifest_sha256=ac1a870b55907d8167cfaacb714950c519c38a21bdf9d5ab182b47fb80c754b3
+camera_plugin_sha256=227e5a6f8d3fb2d302141754342cb1c728decc7a2f40210e7ea6c0805edc9c2f
+421cb952bbbe35b8b16d13c73577fecc71d00bd63834d9df26ab55228c77eac3  tb321fu-camera-stack_20260929.3_arm64.deb
+
+libcamera_runtime_manifest_sha256=f55e74d84bbc07a353b5aef2c8ec8b65c02cbda5eb2c14280fe14859c8bb4e30
+libcamera_build_provenance_sha256=283bed6c760ccede16411180ff804a69ac429c61d8c7456e67fe15cdfd2ba6d7
+== complete runtime build provenance (public inputs only) ==
+{
+  "inputs": {
+    "LIBCAMERA-BUILD-ENVIRONMENT.json": "71e7e3b55d163ed69ab0b15191340fcf1c42886e6cfdcfa4f3bb73c1a0e37b3b",
+    "LIBCAMERA-RUNTIME-REFERENCE.tsv": "f63ceb8b1fd86ebe8041c7b134c16305dfb259856694a0a597577eede16b9942",
+    "adapt-libcamera-build.py": "1929149ac62f4abd0243472c03cea03f2cd50fe7fc2f4afef8ba531e4249ab18",
+    "build-tb321fu-libcamera-runtime.py": "bc9dd738825b5ca78653edbf58a87814408272dbabe47ed9837810b3c5431470",
+    "export-libcamera-source.py": "74889730c02305922e6c33e8d9b059736c4d5b4f280518cb3b10c6f506336277",
+    "libcamera-aarch64.cross": "661faed3b536be8b8d845840cad2300e910b1a82f2d739661386b7c035cdde38",
+    "materialize-libcamera-source.py": "30b78e8b41c78ef6938603705ffdd1c100d375107c4fde6bb86f19cb58ce5aec",
+    "safe-extract-archive.py": "2d3c59d638a8058d7478f47b6c18d852352b9f25396abb660c81ea4906a480ab",
+    "test-libcamera-ipa-isolation.py": "7770aacd63cf4425b32c85340f5dd04d5f9821d953e30d337e6d5491f7ca3e01",
+    "verify-camera-overlay.py": "e0853326bcb9858e2fec15497a8bf48cfaa1c957122e6d24f99dfe45671e8585",
+    "verify-libcamera-build-environment.py": "ddc19a8603bf816db1fe3a8b2e2a5d27dd5d8bb260e0489f0713aa4c9c193bbf",
+    "verify-libcamera-runtime.py": "672e8e1fcf8b620181a619c2b6fcda372c60a6abd2af77a506743142e0920dc2"
+  },
+  "options": [
+    "--prefix=/opt/libcamera-y700",
+    "--libdir=lib/aarch64-linux-gnu",
+    "--buildtype=debugoptimized",
+    "--wrap-mode=nodownload",
+    "-Dpipelines=simple",
+    "-Dipas=simple",
+    "-Dcam=enabled",
+    "-Dqcam=disabled",
+    "-Dgstreamer=enabled",
+    "-Dv4l2=disabled",
+    "-Dtest=false",
+    "-Dlc-compliance=disabled",
+    "-Ddocumentation=disabled",
+    "-Dtracing=disabled",
+    "-Dpycamera=disabled",
+    "-Dcam-jpeg=disabled",
+    "-Dcam-output-kms=disabled",
+    "-Dcam-output-sdl2=disabled",
+    "-Dsoftisp-gpu=enabled",
+    "-Dapps-output-dng=disabled",
+    "-Dipa-force-isolation=true"
+  ],
+  "public_key_der_base64": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2p187q2yrF/KgIhMxVu4LenT2I8jHYA+zZpOePVCGmMDsCFpfItp45cscZMwj9QqiX6bWs7A8Xq/SZcoLxRfeUu3zFl5SmV7wr3qrY0KPfM/6119sOi66H3m24gQ0rqXCmLyCnnU4p+XhZOuagisbfTwc8UDASFp2bE4a9YURCDXfO2oAeCJpczrkO7niqsWoI9ljM2gh02OUfgpe1zHLXhzvBsRaOoDe4E3xYT3jOTc75mfd6zQNZm0FWVYDyxET88qgy7hQeDgdcVBsWnFVG4hht/3UQfXm5gP8KLU5GAT4uHEcni/8L3SCdRHXGDB2l4zQvbiE6mFLHv/ii69+QIDAQAB",
+  "public_key_sha256": "9fcccdeba757d01027bc1c69be1b9d8bb28977bdf28e1ee2e27ec88d1384fb0a",
+  "replica_manifests": [
+    "f55e74d84bbc07a353b5aef2c8ec8b65c02cbda5eb2c14280fe14859c8bb4e30",
+    "f55e74d84bbc07a353b5aef2c8ec8b65c02cbda5eb2c14280fe14859c8bb4e30"
+  ],
+  "runtime_manifest_sha256": "f55e74d84bbc07a353b5aef2c8ec8b65c02cbda5eb2c14280fe14859c8bb4e30",
+  "schema": "tb321fu-libcamera-runtime-v1",
+  "source": {
+    "archive_sha256": "5329c1c4241f3b84cc82658d412f658f7ec8b784f2da63e6742f62880397cd3d",
+    "derived_manifest_sha256": "484eb6692d052ae97a2f1fb9fccf04b91a81fcd837762c41a313403b02345534",
+    "epoch": 1780486138,
+    "lock_sha256": "cee226687407f25f06b4852dde611326513cacee78277cb54cf3003e39d8d48b",
+    "manifest_sha256": "ab0e834f4e861c0fd609d508b4cee4964e1be6c5370feb6d767714ca19ba9161",
+    "tree_sha256": "328f60d3a36125a8e17be8ef93ae49836eae95b5991ba81e0239fdb1c9556668",
+    "version": "0.7.1+tb321fu.328f60d3a36125a8.p1929149ac62f4abd"
+  }
+}
+== complete build runtime manifest (includes build-only headers) ==
+path	type	mode	size	sha256	link_target
+opt	directory	0755	0	-	-
+opt/libcamera-y700	directory	0755	0	-	-
+opt/libcamera-y700/bin	directory	0755	0	-	-
+opt/libcamera-y700/bin/cam	file	0755	264352	80736b69e8ffa06f96972fd2860bccafd2eac044cefdb9ea62b14dbb5fffaabe	-
+opt/libcamera-y700/bin/libcamera-bug-report	file	0755	3033	11aa06fb18270647f41d6f9a73b99842ab1787dc9b7eee1d9f5c1082a2a4b1ae	-
+opt/libcamera-y700/include	directory	0755	0	-	-
+opt/libcamera-y700/include/libcamera	directory	0755	0	-	-
+opt/libcamera-y700/include/libcamera/libcamera	directory	0755	0	-	-
+opt/libcamera-y700/include/libcamera/libcamera/base	directory	0755	0	-	-
+opt/libcamera-y700/include/libcamera/libcamera/base/bound_method.h	file	0644	4860	5b4901a2e90a81ba39564582817cec7db3d2d471ce34edb753c879bdf2b36ba5	-
+opt/libcamera-y700/include/libcamera/libcamera/base/class.h	file	0644	2023	01ff972ba3680e1ed387d0c953c4768d960489510c7bcea15b613d4412fbea0c	-
+opt/libcamera-y700/include/libcamera/libcamera/base/flags.h	file	0644	3681	9364bdc32c4b76b16839be8d6fb3339bee6748ff0be53300cc2a977a95191931	-
+opt/libcamera-y700/include/libcamera/libcamera/base/object.h	file	0644	1545	89f1f3fcfba72129f0f62f382b904297063ca41de2dcd96783830fa6890794d1	-
+opt/libcamera-y700/include/libcamera/libcamera/base/shared_fd.h	file	0644	1068	b1ff014e6a97b25e45476d794deea51f6f0dbaa7ad9883e6340f468fdb347055	-
+opt/libcamera-y700/include/libcamera/libcamera/base/signal.h	file	0644	3703	2a92e5c5d05605af30707ad85d2df01d2c1a2899e950a3378a9836a81b957be0	-
+opt/libcamera-y700/include/libcamera/libcamera/base/span.h	file	0644	12094	5a21c34342bf6d98fa30f2100e7ca8b6f769d719d4dcc926b89705228348b55e	-
+opt/libcamera-y700/include/libcamera/libcamera/base/unique_fd.h	file	0644	861	93bda1fb7336feca78347d322346086decc2647769e4718b57efa77c75af3033	-
+opt/libcamera-y700/include/libcamera/libcamera/camera.h	file	0644	3688	c1af8b85019f33b8f9e2daee88440c9e8afdf15764dc03ce8d488c8a4b189c20	-
+opt/libcamera-y700/include/libcamera/libcamera/camera_manager.h	file	0644	943	ed92065a49fb68cc662685ee5b70eaee0edc0641701d747a8f579fd6d87349a9	-
+opt/libcamera-y700/include/libcamera/libcamera/color_space.h	file	0644	1364	06a720eaff092f437bdf435db7fe2febc4f90606d376a7afbce2d01c7ca5e075	-
+opt/libcamera-y700/include/libcamera/libcamera/control_ids.h	file	0644	17022	478db1516776bea4ce6e2b2d8aeb24712a3c639656f277c1431a771f81544a7e	-
+opt/libcamera-y700/include/libcamera/libcamera/controls.h	file	0644	12545	7da475523dd6adc5b8d71c11da65ec3431217c54e5be80bfeee29a0b9b5fac72	-
+opt/libcamera-y700/include/libcamera/libcamera/fence.h	file	0644	512	6eb2a01b5aee7a970c424635a40a1a13e217ebd5a65fee0ccfc08406114c6038	-
+opt/libcamera-y700/include/libcamera/libcamera/formats.h	file	0644	6898	c27d55d7fd52c2107ab7cdeccb033e3f4d99419c1b16e6cdf0d6d9dadfc6e58f	-
+opt/libcamera-y700/include/libcamera/libcamera/framebuffer.h	file	0644	1445	00b497df084526c76512439c916cf76ca6cf4bd32af3a78ba39afda590c7aa9b	-
+opt/libcamera-y700/include/libcamera/libcamera/framebuffer_allocator.h	file	0644	801	9ae5c47485d2092a2ede802ff4b17320b998b661460bc0ad82a750071506d37e	-
+opt/libcamera-y700/include/libcamera/libcamera/geometry.h	file	0644	6664	864ec080e743f527ae84330da411d6772151e2e6f16dbca63b20c82889f90edf	-
+opt/libcamera-y700/include/libcamera/libcamera/ipa	directory	0755	0	-	-
+opt/libcamera-y700/include/libcamera/libcamera/ipa/core_ipa_interface.h	file	0644	4239	41bc4f0faa0ff7e8a72a644aad86764e15fb836b12ad48912500b0e61b0855e0	-
+opt/libcamera-y700/include/libcamera/libcamera/ipa/ipa_controls.h	file	0644	1068	82e73e8cc6b217bb16ce05c9be41c0e2ff763d2e33e014b1b8cb23f5a3d4ec76	-
+opt/libcamera-y700/include/libcamera/libcamera/ipa/ipa_interface.h	file	0644	439	4f826821d3a543063b6956a2c268102bef927656741d918055b0ab93d954cc75	-
+opt/libcamera-y700/include/libcamera/libcamera/ipa/ipa_module_info.h	file	0644	472	831ee2e5cf71396a618f5b818bff45aaeedffd48466b9c14277f63ca0e1a966b	-
+opt/libcamera-y700/include/libcamera/libcamera/ipa/soft_ipa_interface.h	file	0644	2084	45ab305c99c3e45540446f60d46a5b9401dd985e22de9226192eb025af041f5a	-
+opt/libcamera-y700/include/libcamera/libcamera/libcamera.h	file	0644	791	498f34587353a546120a675d418abd2273d75f00339177432dc8d4a9d938cf58	-
+opt/libcamera-y700/include/libcamera/libcamera/logging.h	file	0644	529	083684a85d236e1cb8fc6d42d9ba6df090d069b313620d3e766d904923318bf1	-
+opt/libcamera-y700/include/libcamera/libcamera/orientation.h	file	0644	543	17f75e9be250c67e8a0224bcbdf938dc4bb9f27af5976154309be8c541f3c058	-
+opt/libcamera-y700/include/libcamera/libcamera/pixel_format.h	file	0644	1073	be6b9e243c098b0eb9f896e2909fdc34dc07048ac80bf08362a82fa4ebcff07d	-
+opt/libcamera-y700/include/libcamera/libcamera/property_ids.h	file	0644	2781	392f0adfa26a26342d34556c79cc2a24c5889cb5c6f269db443e584ad184ce6a	-
+opt/libcamera-y700/include/libcamera/libcamera/request.h	file	0644	1553	7a6e5454e6ea69f4a90e9459656e1cbd8dae0ff1253989be7be49392912ac863	-
+opt/libcamera-y700/include/libcamera/libcamera/stream.h	file	0644	1709	584dc93c4826bb0c7ae27ca47260521d329c660b55efda92577d467dc2216345	-
+opt/libcamera-y700/include/libcamera/libcamera/transform.h	file	0644	1664	148c6e2d81b45f61d32acb63a90f9616cc504c37dc8fabd3afa1c297e89e7be8	-
+opt/libcamera-y700/include/libcamera/libcamera/version.h	file	0644	293	373d0daf9da506485c16269b73aa64f6436f9db4d49a4c81e3ccaf3b543b9871	-
+opt/libcamera-y700/lib	directory	0755	0	-	-
+opt/libcamera-y700/lib/aarch64-linux-gnu	directory	0755	0	-	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0	directory	0755	0	-	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so	file	0755	201728	00de6141eed6c333f8ce40df27c97748897d64e6fd12058712dc643875cf3ad8	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera	directory	0755	0	-	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so	symlink	0777	21	-	libcamera-base.so.0.7
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7	symlink	0777	23	-	libcamera-base.so.0.7.1
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7.1	file	0755	200824	42000351ac17046479ef5bf51d92d986029e02a7164a4ee68306aed0b7452cfa	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so	symlink	0777	16	-	libcamera.so.0.7
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7	symlink	0777	18	-	libcamera.so.0.7.1
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7.1	file	0755	1785760	611b4782136389528e37a6705d6fae7eb285848c09da276bf030e547f4c34fcc	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa	directory	0755	0	-	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa/ipa_soft_simple.so	file	0755	265288	e49f2d9ac1659379d4501cfcb4666ff363e9e64dda7acae6b9fe619a0e3b183d	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa/ipa_soft_simple.so.sign	file	0644	256	020d6ede7cb69da758656e3b251b6ad0b6944cdd6715515edaf98fefb9f6c513	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/pkgconfig	directory	0755	0	-	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/pkgconfig/libcamera-base.pc	file	0644	247	9149b7a4506baee1381d844afac9611767cdcf65c5b5e37a86355060bf7536f5	-
+opt/libcamera-y700/lib/aarch64-linux-gnu/pkgconfig/libcamera.pc	file	0644	257	191a8bf64d9c4f7cd980ff53e5e818a2f33a63f3ad98c6132a1001d98a7146e0	-
+opt/libcamera-y700/libexec	directory	0755	0	-	-
+opt/libcamera-y700/libexec/libcamera	directory	0755	0	-	-
+opt/libcamera-y700/libexec/libcamera/soft_ipa_proxy	file	0755	67664	72eb3de3ad7c5afce62f52a5165fd591ca39e44b492525ce548fe388f6003f8b	-
+opt/libcamera-y700/share	directory	0755	0	-	-
+opt/libcamera-y700/share/libcamera	directory	0755	0	-	-
+opt/libcamera-y700/share/libcamera/ipa	directory	0755	0	-	-
+opt/libcamera-y700/share/libcamera/ipa/simple	directory	0755	0	-	-
+opt/libcamera-y700/share/libcamera/ipa/simple/gc13a0.yaml	file	0644	1420	6d8d5ada7f922e9b11051d5463db3b67f53cdf7b481e7e5197366020b976e92d	-
+opt/libcamera-y700/share/libcamera/ipa/simple/sc202cs.yaml	file	0644	1557	6471cfcc9c787b3b5c45aca8386df0aab18ba512fa01472abf413ba5f3c6de14	-
+opt/libcamera-y700/share/libcamera/ipa/simple/sc820cs.yaml	file	0644	1563	6773cf8576996aa6485e70552604ba5b809a8ec011f6fae149549ff3cb7760ce	-
+opt/libcamera-y700/share/libcamera/ipa/simple/uncalibrated.yaml	file	0644	404	0689579ca79036bbd31d104deafca70fb8b267c4c8f8492e07bd6f6e875ee1ac	-
+
+== package control ==
+ new Debian package, version 2.0.
+ size 848234 bytes: control archive=1318 bytes.
+     892 bytes,    15 lines      control
+     286 bytes,    12 lines   *  postinst             #!/bin/sh
+     286 bytes,    12 lines   *  postrm               #!/bin/sh
+    1555 bytes,    49 lines   *  preinst              #!/bin/sh
+ Package: tb321fu-camera-stack
+ Version: 20260929.3
+ Section: video
+ Priority: optional
+ Architecture: arm64
+ Maintainer: GUF296 <guf296@users.noreply.github.com>
+ Depends: libc6, libstdc++6, libgcc-s1, pipewire, wireplumber, udev, libspa-0.2-modules, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libglib2.0-0t64, libyaml-0-2, libudev1, libegl1, libgles2, libevent-2.1-7t64, libevent-pthreads-2.1-7t64, libunwind8, libdw1t64, libgnutls30t64
+ Recommends: gnome-snapshot
+ Pre-Depends: tb321fu-camera-payload-migrated (>= 1)
+ Replaces: y700-daily-rootfs-overlay, libspa-0.2-libcamera, gstreamer1.0-libcamera
+ Conflicts: libspa-0.2-libcamera, gstreamer1.0-libcamera
+ Provides: y700-camera-stack
+ Description: Lenovo TB321FU camera userspace stack
+  Source-built libcamera, IPA, GStreamer and PipeWire integration candidate.
+  Hardware validation against the historically tested baseline remains required.
+
+== key hashes ==
+611b4782136389528e37a6705d6fae7eb285848c09da276bf030e547f4c34fcc  opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera.so.0.7.1
+42000351ac17046479ef5bf51d92d986029e02a7164a4ee68306aed0b7452cfa  opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera-base.so.0.7.1
+e49f2d9ac1659379d4501cfcb4666ff363e9e64dda7acae6b9fe619a0e3b183d  opt/libcamera-y700/lib/aarch64-linux-gnu/libcamera/ipa/ipa_soft_simple.so
+00de6141eed6c333f8ce40df27c97748897d64e6fd12058712dc643875cf3ad8  opt/libcamera-y700/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlibcamera.so
+227e5a6f8d3fb2d302141754342cb1c728decc7a2f40210e7ea6c0805edc9c2f  usr/lib/aarch64-linux-gnu/spa-0.2/libcamera/libspa-libcamera.so
+
+== plugin dynamic section ==
+
+Dynamic section at offset 0x2fcd0 contains 33 entries:
+  Tag        Type                         Name/Value
+ 0x0000000000000001 (NEEDED)             Shared library: [libcamera.so.0.7]
+ 0x0000000000000001 (NEEDED)             Shared library: [libcamera-base.so.0.7]
+ 0x0000000000000001 (NEEDED)             Shared library: [libstdc++.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [libm.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [ld-linux-aarch64.so.1]
+ 0x000000000000000e (SONAME)             Library soname: [libspa-libcamera.so]
+ 0x000000000000001d (RUNPATH)            Library runpath: [/opt/libcamera-y700/lib/aarch64-linux-gnu]
+ 0x000000000000000c (INIT)               0x6e40
+ 0x000000000000000d (FINI)               0x27f20
+ 0x0000000000000019 (INIT_ARRAY)         0x3f780
+ 0x000000000000001b (INIT_ARRAYSZ)       24 (bytes)
+ 0x000000000000001a (FINI_ARRAY)         0x3f798
+ 0x000000000000001c (FINI_ARRAYSZ)       8 (bytes)
+ 0x000000006ffffef5 (GNU_HASH)           0x1f0
+ 0x0000000000000005 (STRTAB)             0x1d00
+ 0x0000000000000006 (SYMTAB)             0x5d8
+ 0x000000000000000a (STRSZ)              11716 (bytes)
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000003 (PLTGOT)             0x3ffe8
+ 0x0000000000000002 (PLTRELSZ)           3912 (bytes)
+ 0x0000000000000014 (PLTREL)             RELA
+ 0x0000000000000017 (JMPREL)             0x5ef8
+ 0x0000000000000007 (RELA)               0x4e48
+ 0x0000000000000008 (RELASZ)             4272 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x000000006ffffffb (FLAGS_1)            Flags: NODELETE
+ 0x000000006ffffffe (VERNEED)            0x4cb8
+ 0x000000006fffffff (VERNEEDNUM)         5
+ 0x000000006ffffff0 (VERSYM)             0x4ac4
+ 0x000000006ffffff9 (RELACOUNT)          84
+ 0x0000000000000000 (NULL)               0x0
+
+== plugin markers ==
+kwinoutputconfig.json
+/usr/bin/kscreen-doctor
