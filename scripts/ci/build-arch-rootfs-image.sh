@@ -1558,7 +1558,7 @@ prepare_arch_daily_ucm_stage() {
 
 extract_device_payload_dir() {
   local payload_dir=$1
-  local deb overlay stage deb_digest deb_list overlay_list unsupported found=0
+  local deb overlay stage deb_digest radio_digest deb_list overlay_list unsupported found=0
 
   capture_sorted_nul_command deb_list "device DEB enumeration" \
     find "$payload_dir" -type f -name '*.deb' -print0
@@ -1570,6 +1570,11 @@ extract_device_payload_dir() {
     mkdir -p "$stage"
     deb_digest=$(verify_and_extract_imported_deb "$deb" "$stage")
     prepare_arch_daily_ucm_stage "$stage" "$deb_digest"
+    radio_digest=$(python3 -IB "$SCRIPT_DIR/stage-arch-board-radio.py" "$stage" "$KERNEL_VERSION" "$deb_digest")
+    if [ -n "$radio_digest" ]; then
+      [ "$radio_digest" = "$deb_digest" ] || ci_die "unexpected staged radio source digest"
+      arch_radio_daily_digest=$radio_digest
+    fi
     remove_legacy_y700_payload "$stage"
     remove_legacy_camera_payload "$stage"
     merge_stage_to_arch_import "$stage" "deb:$(basename "$deb"):$deb_digest"
@@ -2767,6 +2772,7 @@ CONF
   chmod 0644 "$rootfs_dir/etc/sddm.conf.d/zz-tb321fu-autologin.conf"
 fi
 
+arch_radio_daily_digest=
 apply_device_payloads
 apply_tb321fu_deb_payloads
 install_arch_import_package
@@ -2830,6 +2836,9 @@ rm -f \
   "$rootfs_dir/Y700-ROOTFS-OVERLAY-MANIFEST.tsv"
 
 verify_required_y700_payload "$rootfs_dir"
+if [ -n "$arch_radio_daily_digest" ]; then
+  python3 -IB "$SCRIPT_DIR/stage-arch-board-radio.py" --final "$rootfs_dir" "$KERNEL_VERSION" "$arch_radio_daily_digest"
+fi
 ci_assert_privileged_payload_security "$rootfs_dir" \
   usr/libexec/tb321fu-haptics/bind-aw86937 \
   opt/libcamera-y700/bin/cam \

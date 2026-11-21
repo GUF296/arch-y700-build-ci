@@ -475,4 +475,5 @@ for p in aliases:
         assert p.readlink() == Path("../../LenovoY700TB321/" + target + ".conf")
         assert p.resolve() == base/"LenovoY700TB321"/(target+".conf")
 PY
+python3 -IB "$SCRIPT_DIR/test-arch-board-radio.py"
 printf 'ARCH_IMPORT_BOUNDARY_FIXTURES=PASS\n'
