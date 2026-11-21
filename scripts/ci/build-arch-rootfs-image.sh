@@ -1527,6 +1527,35 @@ enable_y700_device_services() {
   fi
 }
 
+# Only the verified, raw June daily DEB carries this known Lenovo profile.
+# Leave the generic names to Arch's own alsa-ucm-conf; retain the tested
+# device bytes, including the different headphone controls, in the board package.
+prepare_arch_daily_ucm_stage() {
+  local root=$1 deb_sha=$2 rel
+  [ "$deb_sha" = 9b45ab04d455cfcc24ed40779e9522930543330151c254e87a2aee7f381db5bc ] || return 0
+  local ucm="$root/usr/share/alsa/ucm2" board=LenovoY700TB321
+  local -a files=()
+  for rel in "$root" "$root/usr" "$root/usr/share" "$root/usr/share/alsa" "$ucm" \
+    "$ucm/codecs" "$ucm/codecs/wcd939x" "$ucm/$board"; do
+    [ -d "$rel" ] && [ ! -L "$rel" ] || ci_die "expected a real June UCM stage directory"
+  done
+  [ ! -e "$ucm/$board/wcd939x" ] && [ ! -L "$ucm/$board/wcd939x" ] ||
+    ci_die "private June UCM destination already exists"
+  mapfile -d '' -t files < <(find "$ucm/codecs/wcd939x" -mindepth 1 -maxdepth 1 -print0)
+  [ "${#files[@]}" -eq 11 ] || ci_die "unexpected June WCD939x file count"
+  for rel in "${files[@]}" "$ucm/$board/HiFi.conf" "$ucm/$board/$board.conf"; do
+    [ -f "$rel" ] && [ ! -L "$rel" ] && [ "$(stat -c %h -- "$rel")" = 1 ] ||
+      ci_die "unexpected June UCM stage member"
+  done
+  (cd -- "$ucm" && sha256sum --strict --status -c "$SCRIPT_DIR/payloads/TB321FU-JUNE-UCM.sha256") ||
+    ci_die "June UCM stage does not match the tested profile"
+  mv -T -- "$ucm/codecs/wcd939x" "$ucm/$board/wcd939x"
+  # Six HiFi and one card reference; all other references, including the
+  # distro's QCOM helpers and the 17 board aliases, remain untouched.
+  sed -i 's|"/codecs/wcd939x/|"/LenovoY700TB321/wcd939x/|g' \
+    "$ucm/$board/HiFi.conf" "$ucm/$board/$board.conf"
+}
+
 extract_device_payload_dir() {
   local payload_dir=$1
   local deb overlay stage deb_digest deb_list overlay_list unsupported found=0
@@ -1540,6 +1569,7 @@ extract_device_payload_dir() {
     rm -rf "$stage"
     mkdir -p "$stage"
     deb_digest=$(verify_and_extract_imported_deb "$deb" "$stage")
+    prepare_arch_daily_ucm_stage "$stage" "$deb_digest"
     remove_legacy_y700_payload "$stage"
     remove_legacy_camera_payload "$stage"
     merge_stage_to_arch_import "$stage" "deb:$(basename "$deb"):$deb_digest"

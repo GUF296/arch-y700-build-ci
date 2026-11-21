@@ -68,6 +68,7 @@ eval "$(extract_shell_function write_arch_import_payload_metadata)"
 eval "$(extract_shell_function write_arch_package_tree_identity)"
 eval "$(extract_shell_function compute_arch_import_package_hash)"
 eval "$(extract_shell_function capture_sorted_nul_command)"
+eval "$(extract_shell_function prepare_arch_daily_ucm_stage)"
 eval "$(extract_shell_function extract_device_payload_dir)"
 eval "$(extract_shell_function arch_import_iio_sensor_proxy_relation_lines)"
 eval "$(extract_shell_function validate_arch_import_relative_path)"
@@ -425,4 +426,53 @@ hash_source=$(compute_arch_import_package_hash "$manifest_stage" "$manifest_path
 # members; the final tree retains only the two intended metadata files.
 [ ! -e "$manifest_stage/$manifest_tmp" ] || fail "temporary manifest leaked into staged tree"
 
+# Rehearse the real June UCM sequence and 17 board aliases independently of
+# pacman's stock package; public paths must never need an owner exception.
+ucm_fixture="$tmp/june-ucm/usr/share/alsa/ucm2"
+ucm_data="$SCRIPT_DIR/test-fixtures/tested-tb321fu-ucm.json"
+python3 -IB - "$ucm_fixture" "$ucm_data" <<'PY'
+import json, sys
+from pathlib import Path
+base = Path(sys.argv[1])
+for name, text in json.loads(Path(sys.argv[2]).read_text()).items():
+    dest = base / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    dest.chmod(0o644)
+for card in ("Lenovo-Y700-TB321FU", "LenovoY700TB321", "sm8650", "snd_soc_sc8280xp"):
+    folder = base / "conf.d" / card
+    folder.mkdir(parents=True)
+    for name in ("HiFi", "Lenovo-QRD-2.0", "Lenovo-Y700-TB321FU", "LenovoY700TB321"):
+        target = "HiFi" if name == "HiFi" else "LenovoY700TB321"
+        (folder / (name + ".conf")).symlink_to("../../LenovoY700TB321/" + target + ".conf")
+(base / "conf.d/snd-sc8280xp").symlink_to("snd_soc_sc8280xp")
+PY
+test_sha=9b45ab04d455cfcc24ed40779e9522930543330151c254e87a2aee7f381db5bc
+prepare_arch_daily_ucm_stage "$tmp/june-ucm" unrelated-verified-input
+[ -d "$ucm_fixture/codecs/wcd939x" ] || fail "unrelated input changed"
+prepare_arch_daily_ucm_stage "$tmp/june-ucm" "$test_sha"
+python3 -IB - "$ucm_fixture" "$ucm_data" <<'PY'
+import json, os, stat, sys
+from pathlib import Path
+base = Path(sys.argv[1])
+source = json.loads(Path(sys.argv[2]).read_text())
+assert len(source) == 13 and not os.path.lexists(base / "codecs/wcd939x")
+for name, text in source.items():
+    if name.startswith("codecs/"):
+        name = name.replace("codecs/", "LenovoY700TB321/", 1)
+    else:
+        assert text.count('"/codecs/wcd939x/') == (6 if name.endswith("/HiFi.conf") else 1)
+        text = text.replace('"/codecs/wcd939x/', '"/LenovoY700TB321/wcd939x/')
+    path = base / name
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644 and path.read_text() == text
+aliases = [p for p in (base/"conf.d").rglob("*") if p.is_symlink()]
+assert len(aliases) == 17
+for p in aliases:
+    if p.name == "snd-sc8280xp":
+        assert p.readlink() == Path("snd_soc_sc8280xp") and p.resolve() == base/"conf.d/snd_soc_sc8280xp"
+    else:
+        target = "HiFi" if p.name == "HiFi.conf" else "LenovoY700TB321"
+        assert p.readlink() == Path("../../LenovoY700TB321/" + target + ".conf")
+        assert p.resolve() == base/"LenovoY700TB321"/(target+".conf")
+PY
 printf 'ARCH_IMPORT_BOUNDARY_FIXTURES=PASS\n'
